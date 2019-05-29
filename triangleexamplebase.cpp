@@ -233,7 +233,7 @@ void VulkanExampleBase::renderFrame()
 		viewUpdated = false;
 		viewChanged();
 	}
-
+  viewChanged();
 	render();
 	frameCounter++;
 	auto tEnd = std::chrono::high_resolution_clock::now();
