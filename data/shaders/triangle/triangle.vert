@@ -25,5 +25,5 @@ out gl_PerVertex
 void main() 
 {
 	outColor = inColor * ubo.colorParams.x;
-	gl_Position = ubo.projectionMatrix * ubo.viewMatrix * ubo.modelMatrix * vec4(inPos.xyz, 1.0);
+	gl_Position = ubo.projectionMatrix * ubo.viewMatrix * ubo.modelMatrix * vec4(inPos.xyz + 3.0 * ubo.colorParams.x, 1.0);
 }
