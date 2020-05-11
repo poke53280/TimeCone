@@ -24,10 +24,6 @@
 
 #include "imgui.h"
 
-#if defined(__ANDROID__)
-#include "VulkanAndroid.h"
-#endif
-
 namespace vks 
 {
 	class UIOverlay 

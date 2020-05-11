@@ -33,8 +33,6 @@ VkResult VulkanExampleBase::createInstance(bool enableValidation)
 	// Enable surface extensions depending on os
 #if defined(_WIN32)
 	instanceExtensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
-#elif defined(VK_USE_PLATFORM_ANDROID_KHR)
-	instanceExtensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #elif defined(_DIRECT2DISPLAY)
 	instanceExtensions.push_back(VK_KHR_DISPLAY_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
@@ -89,9 +87,7 @@ std::string VulkanExampleBase::getWindowTitle()
 // iOS & macOS: VulkanExampleBase::getAssetPath() implemented externally to allow access to Objective-C components
 const std::string VulkanExampleBase::getAssetPath()
 {
-#if defined(VK_USE_PLATFORM_ANDROID_KHR)
-	return "";
-#elif defined(VK_EXAMPLE_DATA_DIR)
+#if defined(VK_EXAMPLE_DATA_DIR)
 	return VK_EXAMPLE_DATA_DIR;
 #else
 	return "./data/";
@@ -580,15 +576,9 @@ void VulkanExampleBase::updateOverlay()
 	ImGui::TextUnformatted(deviceProperties.deviceName);
 	ImGui::Text("%.2f ms/frame (%.1d fps)", (1000.0f / lastFPS), lastFPS);
 
-#if defined(VK_USE_PLATFORM_ANDROID_KHR)
-	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 5.0f * UIOverlay.scale));
-#endif
 	ImGui::PushItemWidth(110.0f * UIOverlay.scale);
 	OnUpdateUIOverlay(&UIOverlay);
 	ImGui::PopItemWidth();
-#if defined(VK_USE_PLATFORM_ANDROID_KHR)
-	ImGui::PopStyleVar();
-#endif
 
 	ImGui::End();
 	ImGui::PopStyleVar();
@@ -599,11 +589,6 @@ void VulkanExampleBase::updateOverlay()
 		UIOverlay.updated = false;
 	}
 
-#if defined(VK_USE_PLATFORM_ANDROID_KHR)
-	if (mouseButtons.left) {
-		mouseButtons.left = false;
-	}
-#endif
 }
 
 void VulkanExampleBase::drawUI(const VkCommandBuffer commandBuffer)
@@ -733,11 +718,7 @@ VulkanExampleBase::VulkanExampleBase(bool enableValidation)
 		}
 	}
 	
-#if defined(VK_USE_PLATFORM_ANDROID_KHR)
-	// Vulkan library is loaded dynamically on Android
-	bool libLoaded = vks::android::loadVulkanLibrary();
-	assert(libLoaded);
-#elif defined(_DIRECT2DISPLAY)
+#if defined(_DIRECT2DISPLAY)
 
 #elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
 	initWaylandConnection();
@@ -966,21 +947,6 @@ bool VulkanExampleBase::initVulkan()
 	submitInfo.pWaitSemaphores = &semaphores.presentComplete;
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = &semaphores.renderComplete;
-
-#if defined(VK_USE_PLATFORM_ANDROID_KHR)
-	// Get Android device name and manufacturer (to display along GPU name)
-	androidProduct = "";
-	char prop[PROP_VALUE_MAX+1];
-	int len = __system_property_get("ro.product.manufacturer", prop);
-	if (len > 0) {
-		androidProduct += std::string(prop) + " ";
-	};
-	len = __system_property_get("ro.product.model", prop);
-	if (len > 0) {
-		androidProduct += std::string(prop);
-	};
-	LOGD("androidProduct = %s", androidProduct.c_str());
-#endif	
 
 	return true;
 }

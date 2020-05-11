@@ -164,8 +164,8 @@
     <ClInclude Include="imstb_truetype.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />
+    <ClInclude Include="TextOverlay.h" />
     <ClInclude Include="triangleexamplebase.h" />
-    <ClInclude Include="VulkanAndroid.h" />
     <ClInclude Include="VulkanDebug.h" />
     <ClInclude Include="VulkanTools.h" />
     <ClInclude Include="VulkanUIOverlay.h" />
@@ -183,7 +183,6 @@
     </ClCompile>
     <ClCompile Include="TimeCone.cpp" />
     <ClCompile Include="triangleexamplebase.cpp" />
-    <ClCompile Include="VulkanAndroid.cpp" />
     <ClCompile Include="VulkanDebug.cpp" />
     <ClCompile Include="VulkanTools.cpp" />
     <ClCompile Include="VulkanUIOverlay.cpp" />

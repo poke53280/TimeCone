@@ -24,9 +24,6 @@
     <ClInclude Include="triangleexamplebase.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="VulkanAndroid.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="VulkanDebug.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -63,6 +60,9 @@
     <ClInclude Include="frustum.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="TextOverlay.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -84,9 +84,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="imgui.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="VulkanAndroid.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="VulkanDebug.cpp">
