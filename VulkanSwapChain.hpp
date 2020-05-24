@@ -19,9 +19,6 @@
 #include <vulkan/vulkan.h>
 #include "VulkanTools.h"
 
-#ifdef __ANDROID__
-#include "VulkanAndroid.h"
-#endif
 
 // Macro to get a procedure address based on a vulkan instance
 #define GET_INSTANCE_PROC_ADDR(inst, entrypoint)                        \
@@ -77,66 +74,19 @@ public:
 	uint32_t queueNodeIndex = UINT32_MAX;
 
 	/** @brief Creates the platform specific surface abstraction of the native platform window used for presentation */	
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
 	void initSurface(void* platformHandle, void* platformWindow)
-#elif defined(VK_USE_PLATFORM_ANDROID_KHR)
-	void initSurface(ANativeWindow* window)
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-	void initSurface(wl_display *display, wl_surface *window)
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-	void initSurface(xcb_connection_t* connection, xcb_window_t window)
-#elif (defined(VK_USE_PLATFORM_IOS_MVK) || defined(VK_USE_PLATFORM_MACOS_MVK))
-	void initSurface(void* view)
-#elif defined(_DIRECT2DISPLAY)
-	void initSurface(uint32_t width, uint32_t height)
-#endif
 	{
 		VkResult err = VK_SUCCESS;
 
 		// Create the os-specific surface
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
 		VkWin32SurfaceCreateInfoKHR surfaceCreateInfo = {};
 		surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
 		surfaceCreateInfo.hinstance = (HINSTANCE)platformHandle;
 		surfaceCreateInfo.hwnd = (HWND)platformWindow;
 		err = vkCreateWin32SurfaceKHR(instance, &surfaceCreateInfo, nullptr, &surface);
-#elif defined(VK_USE_PLATFORM_ANDROID_KHR)
-		VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
-		surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
-		surfaceCreateInfo.window = window;
-		err = vkCreateAndroidSurfaceKHR(instance, &surfaceCreateInfo, NULL, &surface);
-#elif defined(VK_USE_PLATFORM_IOS_MVK)
-		VkIOSSurfaceCreateInfoMVK surfaceCreateInfo = {};
-		surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_IOS_SURFACE_CREATE_INFO_MVK;
-		surfaceCreateInfo.pNext = NULL;
-		surfaceCreateInfo.flags = 0;
-		surfaceCreateInfo.pView = view;
-		err = vkCreateIOSSurfaceMVK(instance, &surfaceCreateInfo, nullptr, &surface);
-#elif defined(VK_USE_PLATFORM_MACOS_MVK)
-		VkMacOSSurfaceCreateInfoMVK surfaceCreateInfo = {};
-		surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_MACOS_SURFACE_CREATE_INFO_MVK;
-		surfaceCreateInfo.pNext = NULL;
-		surfaceCreateInfo.flags = 0;
-		surfaceCreateInfo.pView = view;
-		err = vkCreateMacOSSurfaceMVK(instance, &surfaceCreateInfo, NULL, &surface);
-#elif defined(_DIRECT2DISPLAY)
-		createDirect2DisplaySurface(width, height);
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-		VkWaylandSurfaceCreateInfoKHR surfaceCreateInfo = {};
-		surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
-		surfaceCreateInfo.display = display;
-		surfaceCreateInfo.surface = window;
-		err = vkCreateWaylandSurfaceKHR(instance, &surfaceCreateInfo, nullptr, &surface);
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-		VkXcbSurfaceCreateInfoKHR surfaceCreateInfo = {};
-		surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
-		surfaceCreateInfo.connection = connection;
-		surfaceCreateInfo.window = window;
-		err = vkCreateXcbSurfaceKHR(instance, &surfaceCreateInfo, nullptr, &surface);
-#endif
 
 		if (err != VK_SUCCESS) {
-			vks::tools::exitFatal("Could not create surface!", err);
+			vks::tools::exitFatal("Could not create surface", err);
 		}
 
 		// Get available queue family properties
@@ -513,143 +463,6 @@ public:
 		surface = VK_NULL_HANDLE;
 		swapChain = VK_NULL_HANDLE;
 	}
-
-#if defined(_DIRECT2DISPLAY)
-	/**
-	* Create direct to display surface
-	*/	
-	void createDirect2DisplaySurface(uint32_t width, uint32_t height)
-	{
-		uint32_t displayPropertyCount;
-		
-		// Get display property
-		vkGetPhysicalDeviceDisplayPropertiesKHR(physicalDevice, &displayPropertyCount, NULL);
-		VkDisplayPropertiesKHR* pDisplayProperties = new VkDisplayPropertiesKHR[displayPropertyCount];
-		vkGetPhysicalDeviceDisplayPropertiesKHR(physicalDevice, &displayPropertyCount, pDisplayProperties);
-
-		// Get plane property
-		uint32_t planePropertyCount;
-		vkGetPhysicalDeviceDisplayPlanePropertiesKHR(physicalDevice, &planePropertyCount, NULL);
-		VkDisplayPlanePropertiesKHR* pPlaneProperties = new VkDisplayPlanePropertiesKHR[planePropertyCount];
-		vkGetPhysicalDeviceDisplayPlanePropertiesKHR(physicalDevice, &planePropertyCount, pPlaneProperties);
-
-		VkDisplayKHR display = VK_NULL_HANDLE;
-		VkDisplayModeKHR displayMode;
-		VkDisplayModePropertiesKHR* pModeProperties;
-		bool foundMode = false;
-
-		for(uint32_t i = 0; i < displayPropertyCount;++i)
-		{
-			display = pDisplayProperties[i].display;
-			uint32_t modeCount;
-			vkGetDisplayModePropertiesKHR(physicalDevice, display, &modeCount, NULL);
-			pModeProperties = new VkDisplayModePropertiesKHR[modeCount];
-			vkGetDisplayModePropertiesKHR(physicalDevice, display, &modeCount, pModeProperties);
-
-			for (uint32_t j = 0; j < modeCount; ++j)
-			{
-				const VkDisplayModePropertiesKHR* mode = &pModeProperties[j];
-
-				if (mode->parameters.visibleRegion.width == width && mode->parameters.visibleRegion.height == height)
-				{
-					displayMode = mode->displayMode;
-					foundMode = true;
-					break;
-				}
-			}
-			if (foundMode)
-			{
-				break;
-			}
-			delete [] pModeProperties;
-		}
-
-		if(!foundMode)
-		{
-			vks::tools::exitFatal("Can't find a display and a display mode!", -1);
-			return;
-		}
-
-		// Search for a best plane we can use
-		uint32_t bestPlaneIndex = UINT32_MAX;
-		VkDisplayKHR* pDisplays = NULL;
-		for(uint32_t i = 0; i < planePropertyCount; i++)
-		{
-			uint32_t planeIndex=i;
-			uint32_t displayCount;
-			vkGetDisplayPlaneSupportedDisplaysKHR(physicalDevice, planeIndex, &displayCount, NULL);
-			if (pDisplays)
-			{
-				delete [] pDisplays;
-			}
-			pDisplays = new VkDisplayKHR[displayCount];
-			vkGetDisplayPlaneSupportedDisplaysKHR(physicalDevice, planeIndex, &displayCount, pDisplays);
-
-			// Find a display that matches the current plane
-			bestPlaneIndex = UINT32_MAX;
-			for(uint32_t j = 0; j < displayCount; j++)
-			{
-				if(display == pDisplays[j])
-				{
-					bestPlaneIndex = i;
-					break;
-				}
-			}
-			if(bestPlaneIndex != UINT32_MAX)
-			{
-				break;
-			}
-		}
-
-		if(bestPlaneIndex == UINT32_MAX)
-		{
-			vks::tools::exitFatal("Can't find a plane for displaying!", -1);
-			return;
-		}
-
-		VkDisplayPlaneCapabilitiesKHR planeCap;
-		vkGetDisplayPlaneCapabilitiesKHR(physicalDevice, displayMode, bestPlaneIndex, &planeCap);
-		VkDisplayPlaneAlphaFlagBitsKHR alphaMode = (VkDisplayPlaneAlphaFlagBitsKHR)0;
-
-		if (planeCap.supportedAlpha & VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_PREMULTIPLIED_BIT_KHR)
-		{
-			alphaMode = VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_PREMULTIPLIED_BIT_KHR;
-		}
-		else if (planeCap.supportedAlpha & VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_BIT_KHR)
-		{
-			alphaMode = VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_BIT_KHR;
-		}
-		else if (planeCap.supportedAlpha & VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR)
-		{
-			alphaMode = VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR;
-		}
-		else if (planeCap.supportedAlpha & VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR)
-		{
-			alphaMode = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
-		}
-
-		VkDisplaySurfaceCreateInfoKHR surfaceInfo{};
-		surfaceInfo.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
-		surfaceInfo.pNext = NULL;
-		surfaceInfo.flags = 0;
-		surfaceInfo.displayMode = displayMode;
-		surfaceInfo.planeIndex = bestPlaneIndex;
-		surfaceInfo.planeStackIndex = pPlaneProperties[bestPlaneIndex].currentStackIndex;
-		surfaceInfo.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-		surfaceInfo.globalAlpha = 1.0;
-		surfaceInfo.alphaMode = alphaMode;
-		surfaceInfo.imageExtent.width = width;
-		surfaceInfo.imageExtent.height = height;
-
-		VkResult result = vkCreateDisplayPlaneSurfaceKHR(instance, &surfaceInfo, NULL, &surface);
-		if (result !=VK_SUCCESS) {
-			vks::tools::exitFatal("Failed to create surface!", result);
-		}
-
-		delete[] pDisplays;
-		delete[] pModeProperties;
-		delete[] pDisplayProperties;
-		delete[] pPlaneProperties;
-	}
-#endif 
 };
+
+

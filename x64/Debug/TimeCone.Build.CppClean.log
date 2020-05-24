@@ -5,13 +5,13 @@ c:\users\t149900\documents\github\timecone\x64\debug\stdafx.obj
 c:\users\t149900\documents\github\timecone\x64\debug\vulkanuioverlay.obj
 c:\users\t149900\documents\github\timecone\x64\debug\vulkantools.obj
 c:\users\t149900\documents\github\timecone\x64\debug\vulkandebug.obj
-c:\users\t149900\documents\github\timecone\x64\debug\vulkanandroid.obj
-c:\users\t149900\documents\github\timecone\x64\debug\triangleexamplebase.obj
 c:\users\t149900\documents\github\timecone\x64\debug\timecone.obj
 c:\users\t149900\documents\github\timecone\x64\debug\imgui_widgets.obj
 c:\users\t149900\documents\github\timecone\x64\debug\imgui_draw.obj
 c:\users\t149900\documents\github\timecone\x64\debug\imgui_demo.obj
 c:\users\t149900\documents\github\timecone\x64\debug\imgui.obj
+c:\users\t149900\documents\github\timecone\x64\debug\textoverlay.obj
+c:\users\t149900\documents\github\timecone\x64\debug\triangleexamplebase.obj
 c:\users\t149900\documents\github\timecone\x64\debug\timecone.exe
 c:\users\t149900\documents\github\timecone\x64\debug\timecone.ilk
 c:\users\t149900\documents\github\timecone\x64\debug\timecone.pdb

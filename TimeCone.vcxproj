@@ -153,6 +153,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="ArenaCubes.h" />
     <ClInclude Include="benchmark.hpp" />
     <ClInclude Include="camera.hpp" />
     <ClInclude Include="frustum.hpp" />
@@ -167,6 +168,9 @@
     <ClInclude Include="TextOverlay.h" />
     <ClInclude Include="triangleexamplebase.h" />
     <ClInclude Include="VulkanDebug.h" />
+    <ClInclude Include="VulkanDevice.hpp" />
+    <ClInclude Include="VulkanFrameBuffer.hpp" />
+    <ClInclude Include="VulkanSwapChain.hpp" />
     <ClInclude Include="VulkanTools.h" />
     <ClInclude Include="VulkanUIOverlay.h" />
   </ItemGroup>
@@ -181,6 +185,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="TextOverlay.cpp" />
     <ClCompile Include="TimeCone.cpp" />
     <ClCompile Include="triangleexamplebase.cpp" />
     <ClCompile Include="VulkanDebug.cpp" />
