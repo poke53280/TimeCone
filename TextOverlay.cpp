@@ -633,25 +633,4 @@ TextOverlay::updateCommandBuffers()
     }
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////
-//
-//
-//   submit
-//
-// Submit the text command buffers to a queue
-    // Does a queue wait idle
-void
-TextOverlay::submit(VkQueue queue, uint32_t bufferindex)
-{
-    if (!_visible)
-    {
-        return;
-    }
 
-    VkSubmitInfo submitInfo = {};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &_cmdBuffers[bufferindex];
-
-    VK_CHECK_RESULT(vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
-    VK_CHECK_RESULT(vkQueueWaitIdle(queue));
-}

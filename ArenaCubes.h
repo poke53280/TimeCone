@@ -1,31 +1,12 @@
 
 #pragma once
 #include <cmath>
+#include <vector>
+#include <random>
 
 struct instance_data {
     float data[4];
 };
-
-
-void get_instance_data(std::vector<instance_data>& lcData, uint32_t nInstances) {
-
-    std::default_random_engine generator;
-    std::uniform_real_distribution<float> distribution(-1.f, 1.f);
-
-    float pos_scale = 300.f;
-    float vel_scale = 10.f;
-
-    for (uint32_t i = 0; i < nInstances; i++) {
-        float x_pos = pos_scale * distribution(generator);
-        float y_pos = pos_scale * distribution(generator);
-        float x_vel = vel_scale * distribution(generator);
-        float y_vel = vel_scale * distribution(generator);
-
-        lcData.push_back({ x_pos, y_pos, x_vel, y_vel });
-    }
-
-}
-
 
 struct arena_vertex {
     float position[3];

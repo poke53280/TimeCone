@@ -499,26 +499,6 @@ VulkanExampleBase::~VulkanExampleBase()
 
 	vkDestroyInstance(instance, nullptr);
 
-#if defined(_DIRECT2DISPLAY)
-
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-	wl_shell_surface_destroy(shell_surface);
-	wl_surface_destroy(surface);
-	if (keyboard)
-		wl_keyboard_destroy(keyboard);
-	if (pointer)
-		wl_pointer_destroy(pointer);
-	wl_seat_destroy(seat);
-	wl_shell_destroy(shell);
-	wl_compositor_destroy(compositor);
-	wl_registry_destroy(registry);
-	wl_display_disconnect(display);
-#elif defined(VK_USE_PLATFORM_ANDROID_KHR)
-	// todo : android cleanup (if required)
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-	xcb_destroy_window(connection, window);
-	xcb_disconnect(connection);
-#endif
 }
 
 bool VulkanExampleBase::initVulkan()

@@ -26,14 +26,9 @@ out gl_PerVertex
 
 void main()  
 {
-
-	// outColor = inColor * ubo.colorParams.x;
 	outColor = inColor + vec4(instanced_data.z, 0 , 0, 0);
-
-	const float velocity = 3.f;
-
-	gl_Position = ubo.projectionMatrix * ubo.viewMatrix * vec4(vec3(inPos.x + 3 * instanced_data.x + ubo.colorParams.x * instanced_data.z * velocity, inPos.y + 3 * instanced_data.y + ubo.colorParams.x * instanced_data.w * velocity, inPos.z), 1.0);
-	
+	gl_Position = ubo.projectionMatrix * ubo.viewMatrix * vec4(vec3(inPos.x + instanced_data.x + ubo.colorParams.x * instanced_data.z, inPos.y + instanced_data.y + ubo.colorParams.x * instanced_data.w, inPos.z), 1.0);
 }
+
 
 

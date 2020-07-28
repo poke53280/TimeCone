@@ -100,9 +100,6 @@ public:
     // Needs to be called by the application
     void updateCommandBuffers();
 
-    // Submit the text command buffers to a queue
-    // Does a queue wait idle
-    void submit(VkQueue queue, uint32_t bufferindex);
-
 };
+
 
