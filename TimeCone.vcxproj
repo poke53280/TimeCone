@@ -104,7 +104,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions);VK_USE_PLATFORM_WIN32_KHRVK_USE_PLATFORM_WIN32_KHR;VK_USE_PLATFORM_WIN32_KHR</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>C:\VulkanSDK\1.1.121.2\Include;C:\vulkan_ext\glm-0.9.9.6\glm</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\vulkan_ext;C:\VulkanSDK\1.1.121.2\Include;C:\vulkan_ext\glm-0.9.9.6\glm</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

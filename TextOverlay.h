@@ -74,11 +74,8 @@ public:
         std::vector<VkPipelineShaderStageCreateInfo> shaderstages);
     
     ~TextOverlay();
-
-
     
     void prepareResources();
-
 
     // Prepare a separate pipeline for the font rendering decoupled from the main application
     void preparePipeline();
