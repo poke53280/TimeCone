@@ -240,6 +240,9 @@ public:
 	*/
 	virtual VkResult createInstance(bool enableValidation);
 
+
+	static void setupRenderPass(VkDevice device, VulkanSwapChain swapChain, VkFormat depthFormat, VkRenderPass& renderPass);
+
 	// Pure virtual render function (override in derived class)
 	virtual void render() = 0;
 	// Called when view change occurs
@@ -269,8 +272,6 @@ public:
 	// Implement in derived class to setup a custom framebuffer (e.g. for MSAA)
 	virtual void setupFrameBuffer() = 0;
 	// Setup a default render pass
-	// Implement in derived class to setup a custom render pass (e.g. for MSAA)
-	virtual void setupRenderPass() = 0;
 
 	/** @brief (Virtual) Called after the physical device features have been read, can be used to set features to enable on the device */
 	virtual void getEnabledFeatures();
