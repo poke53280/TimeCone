@@ -15,11 +15,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
-#include "SessionTime.h"
-#include "RobotPark.h"
 
-
-#include "TextOverlay.h"
 
 #define VERTEX_BUFFER_BIND_ID 0
 #define ENABLE_VALIDATION true
@@ -143,6 +139,51 @@ uint32_t VulkanExampleBase::getMemoryTypeIndex(uint32_t typeBits, VkMemoryProper
 
 	throw "Could not find a suitable memory type!";
 }
+
+
+// Vulkan loads it's shaders from an immediate binary representation called SPIR-V
+	// Shaders are compiled offline from e.g. GLSL using the reference glslang compiler
+	// This function loads such a shader from a binary file and returns a shader module structure
+VkShaderModule VulkanExampleBase::loadSPIRVShader(std::string filename)
+{
+	size_t shaderSize;
+	char* shaderCode = NULL;
+
+	std::ifstream is(filename, std::ios::binary | std::ios::in | std::ios::ate);
+
+	if (is.is_open())
+	{
+		shaderSize = is.tellg();
+		is.seekg(0, std::ios::beg);
+		// Copy file contents into a buffer
+		shaderCode = new char[shaderSize];
+		is.read(shaderCode, shaderSize);
+		is.close();
+		assert(shaderSize > 0);
+	}
+
+	if (shaderCode)
+	{
+		// Create a new shader module that will be used for pipeline creation
+		VkShaderModuleCreateInfo moduleCreateInfo{};
+		moduleCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		moduleCreateInfo.codeSize = shaderSize;
+		moduleCreateInfo.pCode = (uint32_t*)shaderCode;
+
+		VkShaderModule shaderModule;
+		VK_CHECK_RESULT(vkCreateShaderModule(_device, &moduleCreateInfo, NULL, &shaderModule));
+
+		delete[] shaderCode;
+
+		return shaderModule;
+	}
+	else
+	{
+		std::cerr << "Error: Could not open shader file \"" << filename << "\"" << std::endl;
+		return VK_NULL_HANDLE;
+	}
+}
+
 
 // Get a new command buffer from the command pool
   // If begin is true, the command buffer is also started so we can start adding commands
@@ -349,9 +390,8 @@ void VulkanExampleBase::prepare()
 	createCommandBuffers();
 	createTextureImage();
 
-	// createSynchronizationPrimitives();
-	setupDepthStencil();
-    setupRenderPass(_device, _swapChain, _depthFormat, _renderPass);
+    staticSetupDepthStencil(_device, _depthFormat, _width, _height, _depthStencil, _vulkanDevice);
+    staticSetupRenderPass(_device, _swapChain, _depthFormat, _renderPass);
 	createPipelineCache();
 	setupFrameBuffer();
 	_settings.overlay = _settings.overlay && (!_benchmark.active);
@@ -365,6 +405,21 @@ void VulkanExampleBase::prepare()
 		_UIOverlay.prepareResources();
 		_UIOverlay.preparePipeline(_pipelineCache, _renderPass);
 	}
+	prepareSynchronizationPrimitives();
+	arena_prepareVertices();
+	prepare_instanced_buffer();
+	arena_prepareUniformBuffers();
+	arena_setupDescriptorSetLayout();
+
+	// Renderpass this pipeline is attached to
+	// The layout used for this pipeline (can be shared among multiple pipelines using the same layout)
+	arena_pl = arena_createPipeline(_renderPass, arena_pipelineLayout);
+	setupDescriptorPool();
+	arena_setupDescriptorSet();
+	buildCommandBuffers();
+	prepareTextOverlay();
+	_prepared = true;
+
 }
 
 VkPipelineShaderStageCreateInfo VulkanExampleBase::loadShader(std::string fileName, VkShaderStageFlagBits stage)
@@ -603,10 +658,62 @@ VulkanExampleBase::VulkanExampleBase(bool enableValidation)
 		setupConsole("Vulkan validation output");
 	}
 	setupDPIAwareness();
+
+	sessionTime = new SessionTime();
+
+	uint32_t t0 = sessionTime->getTimeMS();
+
+	robotPark = new RobotPark(1000, t0);
+	_zoom = -125.0f;
+	_title = "THE GAME";
+	// Values not set here are initialized in the base class constructor
+	_settings.overlay = false;
+
+
 }
 
 VulkanExampleBase::~VulkanExampleBase()
 {
+
+	// Clean up used Vulkan resources 
+		// Note : Inherited destructor cleans up resources stored in base class
+
+		// Clean up texture resources
+
+	vkDestroyPipeline(_device, arena_pl, nullptr);
+
+	vkDestroyPipelineLayout(_device, arena_pipelineLayout, nullptr);
+	vkDestroyDescriptorSetLayout(_device, arena_descriptorSetLayout, nullptr);
+
+	vkDestroyBuffer(_device, arena_vertices.buffer, nullptr);
+	vkFreeMemory(_device, arena_vertices.memory, nullptr);
+
+	vkDestroyBuffer(_device, arena_indices.buffer, nullptr);
+	vkFreeMemory(_device, arena_indices.memory, nullptr);
+
+	vkDestroyBuffer(_device, arena_uniformBufferVS.buffer, nullptr);
+	vkFreeMemory(_device, arena_uniformBufferVS.memory, nullptr);
+
+	vkDestroyBuffer(_device, arena_instance_data.buffer, nullptr);
+	vkFreeMemory(_device, arena_instance_data.memory, nullptr);
+
+	if (textOverlay != nullptr)
+	{
+		delete(textOverlay);
+		textOverlay = nullptr;
+	}
+
+	vkDestroySemaphore(_device, presentCompleteSemaphore, nullptr);
+	vkDestroySemaphore(_device, renderCompleteSemaphore, nullptr);
+
+	for (auto& fence : _waitFences)
+	{
+		vkDestroyFence(_device, fence, nullptr);
+	}
+
+	delete robotPark;
+	robotPark = nullptr;
+
 	// Clean up Vulkan resources
 	_swapChain.cleanup();
 	if (_descriptorPool != VK_NULL_HANDLE)
@@ -632,15 +739,6 @@ VulkanExampleBase::~VulkanExampleBase()
 
 	vkDestroyCommandPool(_device, _cmdPool, nullptr);
 
-	//vkDestroySemaphore(_device, _semaphores.presentComplete, nullptr);
-	//vkDestroySemaphore(_device, _semaphores.renderComplete, nullptr);
-
-	/*
-	for (auto& fence : _waitFences) {
-		vkDestroyFence(_device, fence, nullptr);
-	}
-	*/
-
 	if (_settings.overlay) {
 		_UIOverlay.freeResources();
 	}
@@ -655,6 +753,89 @@ VulkanExampleBase::~VulkanExampleBase()
 	vkDestroyInstance(_instance, nullptr);
 
 }
+
+// Update the text buffer displayed by the text overlay
+void VulkanExampleBase::updateTextOverlay(void)
+{
+	textOverlay->beginTextUpdate();
+
+	textOverlay->addText(_title, 5.0f, 5.0f, TextOverlay::alignLeft);
+
+	float arena_rotationX = arena_uboVS.modelMatrix[0][0];
+	float arena_rotationY = arena_uboVS.modelMatrix[1][0];
+
+	float rAngle = std::atan2(arena_rotationY, arena_rotationX);
+
+	if (rAngle < 0.f)
+	{
+		rAngle += float(2.0 * E_PI);
+	}
+
+	rAngle /= float(2.0 * E_PI);   // [0..1]
+
+	rAngle -= 0.75f;   // Some magic to fit matrix values. Clean up.
+
+	if (rAngle < 0.f)
+	{
+		rAngle += 1.f;
+	}
+
+	rAngle *= float(2.0 * E_PI);
+
+	float fRay = rAngle * 2.0f / float(E_PI) / 0.05f;
+
+	int nRay = int(fRay + .5f);
+
+	textOverlay->addText(_title, 5.0f, 5.0f, TextOverlay::alignLeft);
+
+	std::stringstream ss;
+	ss << std::fixed << std::setprecision(2) << (_frameTimer * 1000.0f) << "ms (" << _lastFPS << " fps) " << _deviceProperties.deviceName << " rotation " << rAngle << " nRay " << nRay;
+	textOverlay->addText(ss.str(), 5.0f, 25.0f, TextOverlay::alignLeft);
+
+	// Display current model view matrix
+	textOverlay->addText("model view matrix", (float)_width, 5.0f, TextOverlay::alignRight);
+
+
+	for (uint32_t i = 0; i < 4; i++)
+	{
+		ss.str("");
+		ss << std::fixed << std::setprecision(2) << std::showpos;
+		ss << arena_uboVS.modelMatrix[0][i] << " " << arena_uboVS.modelMatrix[1][i] << " " << arena_uboVS.modelMatrix[2][i] << " " << arena_uboVS.modelMatrix[3][i];
+		textOverlay->addText(ss.str(), (float)_width, 25.0f + (float)i * 20.0f, TextOverlay::alignRight);
+	}
+
+	glm::vec3 projected = glm::project(glm::vec3(34.6281052f, 20.0473022f, 11.0037498f), arena_uboVS.modelMatrix, arena_uboVS.projectionMatrix, glm::vec4(0, 0, (float)_width, (float)_height));
+
+	// textOverlay->addText("IRAY7.I5", projected.x, projected.y, TextOverlay::alignCenter);
+	textOverlay->addText("[X]", projected.x, projected.y, TextOverlay::alignCenter);
+
+	textOverlay->addText("Info...", 5.0f, 65.0f, TextOverlay::alignLeft);
+	textOverlay->addText("---", 5.0f, 85.0f, TextOverlay::alignLeft);
+
+	textOverlay->endTextUpdate();
+}
+
+
+void VulkanExampleBase::prepareTextOverlay()
+{
+	// Load the text rendering shaders
+	std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+	shaderStages.push_back(loadShader(getAssetPath() + "shaders/textoverlay/text.vert.spv", VK_SHADER_STAGE_VERTEX_BIT));
+	shaderStages.push_back(loadShader(getAssetPath() + "shaders/textoverlay/text.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT));
+
+	textOverlay = new TextOverlay(
+		_vulkanDevice,
+		_queue,
+		_frameBuffers,
+		_swapChain.colorFormat,
+		_depthFormat,
+		&_width,
+		&_height,
+		shaderStages
+	);
+	updateTextOverlay();
+}
+
 
 bool VulkanExampleBase::initVulkan()
 {
@@ -1066,13 +1247,11 @@ void VulkanExampleBase::handleMessages(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 	}
 }
 
-void VulkanExampleBase::viewChanged() {}
 
 void VulkanExampleBase::keyPressed(uint32_t) {}
 
 void VulkanExampleBase::mouseMoved(double x, double y, bool & handled) {}
 
-void VulkanExampleBase::buildCommandBuffers() {}
 
 void VulkanExampleBase::createCommandPool()
 {
@@ -1083,14 +1262,14 @@ void VulkanExampleBase::createCommandPool()
 	VK_CHECK_RESULT(vkCreateCommandPool(_device, &cmdPoolInfo, nullptr, &_cmdPool));
 }
 
-void VulkanExampleBase::setupDepthStencil()
+void VulkanExampleBase::staticSetupDepthStencil(VkDevice device, VkFormat depthFormat, uint32_t width, uint32_t height, depthStencil_t& depthStencil, vks::VulkanDevice* vulkanDevice)
 {
 	VkImageCreateInfo image = {};
 	image.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	image.pNext = NULL;
 	image.imageType = VK_IMAGE_TYPE_2D;
-	image.format = _depthFormat;
-	image.extent = { _width, _height, 1 };
+	image.format = depthFormat;
+	image.extent = { width, height, 1 };
 	image.mipLevels = 1;
 	image.arrayLayers = 1;
 	image.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1108,7 +1287,7 @@ void VulkanExampleBase::setupDepthStencil()
 	depthStencilView.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	depthStencilView.pNext = NULL;
 	depthStencilView.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	depthStencilView.format = _depthFormat;
+	depthStencilView.format = depthFormat;
 	depthStencilView.flags = 0;
 	depthStencilView.subresourceRange = {};
 	depthStencilView.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
@@ -1119,17 +1298,458 @@ void VulkanExampleBase::setupDepthStencil()
 
 	VkMemoryRequirements memReqs;
 
-	VK_CHECK_RESULT(vkCreateImage(_device, &image, nullptr, &_depthStencil.image));
-	vkGetImageMemoryRequirements(_device, _depthStencil.image, &memReqs);
+	VK_CHECK_RESULT(vkCreateImage(device, &image, nullptr, &depthStencil.image));
+	vkGetImageMemoryRequirements(device, depthStencil.image, &memReqs);
 	mem_alloc.allocationSize = memReqs.size;
-	mem_alloc.memoryTypeIndex = _vulkanDevice->getMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-	VK_CHECK_RESULT(vkAllocateMemory(_device, &mem_alloc, nullptr, &_depthStencil.mem));
-	VK_CHECK_RESULT(vkBindImageMemory(_device, _depthStencil.image, _depthStencil.mem, 0));
+    mem_alloc.memoryTypeIndex = vulkanDevice->getMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	VK_CHECK_RESULT(vkAllocateMemory(device, &mem_alloc, nullptr, &depthStencil.mem));
+	VK_CHECK_RESULT(vkBindImageMemory(device, depthStencil.image, depthStencil.mem, 0));
 
-	depthStencilView.image = _depthStencil.image;
-	VK_CHECK_RESULT(vkCreateImageView(_device, &depthStencilView, nullptr, &_depthStencil.view));
+	depthStencilView.image = depthStencil.image;
+	VK_CHECK_RESULT(vkCreateImageView(device, &depthStencilView, nullptr, &depthStencil.view));
 }
 
+
+
+// Prepare vertex and index buffers for indexed triangles
+// Also uploads them to device local memory using staging and initializes vertex input and attribute binding to match the vertex shader
+void VulkanExampleBase::arena_prepareVertices()
+{
+
+	// VmaMemoryUsage
+	// VMA_MEMORY_USAGE_CPU_TO_GPU
+
+
+	// Setup vertices
+
+	std::vector<arena_vertex> lcVertex;
+
+	// create_cube_arena(lcVertex);
+	create_single_cube(lcVertex);
+
+	uint32_t vertexBufferSize = static_cast<uint32_t>(lcVertex.size()) * sizeof(arena_vertex);
+
+	uint32_t num_cubes = uint32_t(lcVertex.size() / 8);
+
+	std::vector<uint32_t> lcIndex;
+
+	setup_indices(lcIndex, num_cubes);
+
+	arena_indices.count = static_cast<uint32_t>(lcIndex.size());
+	uint32_t indexBufferSize = arena_indices.count * sizeof(uint32_t);
+
+
+
+	// Static data like vertex and index buffer should be stored on the device memory 
+	// for optimal (and fastest) access by the GPU
+	//
+	// To achieve this we use so-called "staging buffers" :
+	// - Create a buffer that's visible to the host (and can be mapped)
+	// - Copy the data to this buffer
+	// - Create another buffer that's local on the device (VRAM) with the same size
+	// - Copy the data from the host to the device using a command buffer
+	// - Delete the host visible (staging) buffer
+	// - Use the device local buffers for rendering
+
+	struct StagingBuffer {
+		VkDeviceMemory memory;
+		VkBuffer buffer;
+	};
+
+
+	StagingBuffer vertices_stagingBuffer;
+	StagingBuffer indices_stagingBuffer;
+	// StagingBuffer instance_stagingBuffer;
+
+	//  Vertex buffer
+
+	// Create a host-visible buffer to copy the vertex data to (staging buffer)
+
+
+	VK_CHECK_RESULT(_vulkanDevice->createBuffer(
+		VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		vertexBufferSize,
+		&vertices_stagingBuffer.buffer,
+		&vertices_stagingBuffer.memory,
+		lcVertex.data()));
+
+
+	// Create a device local buffer to which the (host local) vertex data will be copied (below) and which will be used for rendering
+
+	VK_CHECK_RESULT(_vulkanDevice->createBuffer(
+		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		vertexBufferSize,
+		&arena_vertices.buffer,
+		&arena_vertices.memory));
+
+
+	// Index buffer
+
+	// Copy index data to a buffer visible to the host (staging buffer)
+
+	VK_CHECK_RESULT(_vulkanDevice->createBuffer(
+		VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		indexBufferSize,
+		&indices_stagingBuffer.buffer,
+		&indices_stagingBuffer.memory,
+		lcIndex.data()));
+
+	// Create destination buffer with device only visibility
+
+
+	VK_CHECK_RESULT(_vulkanDevice->createBuffer(
+		VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		indexBufferSize,
+		&arena_indices.buffer,
+		&arena_indices.memory));
+
+
+
+	// Buffer copies have to be submitted to a queue, so we need a command buffer for them
+	// Note: Some devices offer a dedicated transfer queue (with only the transfer bit set) that may be faster when doing lots of copies
+	{
+		VkCommandBuffer copyCmd = getCommandBuffer(true);
+
+		// Put buffer region copies into command buffer
+		VkBufferCopy copyRegion = {};
+
+		// Vertex buffer
+		copyRegion.size = vertexBufferSize;
+		vkCmdCopyBuffer(copyCmd, vertices_stagingBuffer.buffer, arena_vertices.buffer, 1, &copyRegion);
+
+		// Index buffer
+		copyRegion.size = indexBufferSize;
+		vkCmdCopyBuffer(copyCmd, indices_stagingBuffer.buffer, arena_indices.buffer, 1, &copyRegion);
+
+		// Instance data
+		//copyRegion.size = instanceBufferSize;
+		//vkCmdCopyBuffer(copyCmd, instance_stagingBuffer.buffer, arena_instance_data.buffer, 1, &copyRegion);
+
+		// Flushing the command buffer will also submit it to the queue and uses a fence to ensure that all commands have been executed before returning
+		flushCommandBuffer(copyCmd);
+	}
+
+	// Destroy staging buffers
+	// Note: Staging buffer must not be deleted before the copies have been submitted and executed
+	vkDestroyBuffer(_device, vertices_stagingBuffer.buffer, nullptr);
+	vkFreeMemory(_device, vertices_stagingBuffer.memory, nullptr);
+	vkDestroyBuffer(_device, indices_stagingBuffer.buffer, nullptr);
+	vkFreeMemory(_device, indices_stagingBuffer.memory, nullptr);
+
+	//vkDestroyBuffer(device, instance_stagingBuffer.buffer, nullptr);
+	//vkFreeMemory(device, instance_stagingBuffer.memory, nullptr);
+
+
+}
+
+
+void VulkanExampleBase::arena_updateUniformBuffers()
+{
+	// Update matrices
+	arena_uboVS.projectionMatrix = glm::perspective(glm::radians(35.0f), (float)_width / (float)_height, 0.1f, 4096.0f);
+
+	arena_uboVS.modelMatrix = glm::mat4(1.0f);
+
+
+	if (_camera.keys.up) {
+		y_center -= 0.01f;
+	}
+
+	if (_camera.keys.down) {
+		y_center += 0.01f;
+	}
+
+	if (_camera.keys.left) {
+		x_center -= 0.01f;
+	}
+
+	if (_camera.keys.right) {
+		x_center += 0.01f;
+	}
+
+
+
+	arena_uboVS.viewMatrix = glm::lookAt(glm::vec3(x_center, y_center, 150), glm::vec3(x_center, y_center, 0), glm::vec3(0, 1, 0));
+
+
+	float ms = float(sessionTime->getTimeMS());
+
+	// Set color params
+	arena_uboVS.colorParams = glm::vec4(ms, 0, 0, 0);
+
+
+	// Map uniform buffer and update it
+
+	uint8_t* pData;
+
+	VK_CHECK_RESULT(vkMapMemory(_device, arena_uniformBufferVS.memory, 0, sizeof(arena_uboVS), 0, (void**)&pData));
+
+	memcpy(pData, &arena_uboVS, sizeof(arena_uboVS));
+
+	// Unmap after data has been copied
+	// Note: Since we requested a host coherent memory type for the uniform buffer, the write is instantly visible to the GPU
+
+	vkUnmapMemory(_device, arena_uniformBufferVS.memory);
+}
+
+
+void VulkanExampleBase::arena_prepareUniformBuffers()
+{
+	// Prepare and initialize a uniform buffer block containing shader uniforms
+	// Single uniforms like in OpenGL are no longer present in Vulkan. All Shader uniforms are passed via uniform buffer blocks
+	VkMemoryRequirements memReqs;
+
+	// Vertex shader uniform buffer block
+	VkBufferCreateInfo bufferInfo = {};
+	VkMemoryAllocateInfo allocInfo = {};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.pNext = nullptr;
+	allocInfo.allocationSize = 0;
+	allocInfo.memoryTypeIndex = 0;
+
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = sizeof(arena_uboVS);
+	// This buffer will be used as a uniform buffer
+	bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+	// Create a new buffer
+	VK_CHECK_RESULT(vkCreateBuffer(_device, &bufferInfo, nullptr, &arena_uniformBufferVS.buffer));
+	// Get memory requirements including size, alignment and memory type 
+	vkGetBufferMemoryRequirements(_device, arena_uniformBufferVS.buffer, &memReqs);
+	allocInfo.allocationSize = memReqs.size;
+	// Get the memory type index that supports host visibile memory access
+	// Most implementations offer multiple memory types and selecting the correct one to allocate memory from is crucial
+	// We also want the buffer to be host coherent so we don't have to flush (or sync after every update.
+	// Note: This may affect performance so you might not want to do this in a real world application that updates buffers on a regular base
+	allocInfo.memoryTypeIndex = getMemoryTypeIndex(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+	// Allocate memory for the uniform buffer
+	VK_CHECK_RESULT(vkAllocateMemory(_device, &allocInfo, nullptr, &(arena_uniformBufferVS.memory)));
+	// Bind memory to buffer
+	VK_CHECK_RESULT(vkBindBufferMemory(_device, arena_uniformBufferVS.buffer, arena_uniformBufferVS.memory, 0));
+
+	// Store information in the uniform's descriptor that is used by the descriptor set
+	arena_uniformBufferVS.descriptor.buffer = arena_uniformBufferVS.buffer;
+	arena_uniformBufferVS.descriptor.offset = 0;
+	arena_uniformBufferVS.descriptor.range = sizeof(arena_uboVS);
+
+	arena_updateUniformBuffers();
+}
+
+
+
+VkPipeline VulkanExampleBase::arena_createPipeline(VkRenderPass rpass, VkPipelineLayout pl_layout)
+{
+	// Create a graphics pipeline
+
+	// A big setup ending in one vk call: vkCreateGraphicsPipelines
+
+	VkGraphicsPipelineCreateInfo pipelineCreateInfo = {};
+	pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+
+	pipelineCreateInfo.layout = pl_layout;
+	pipelineCreateInfo.renderPass = rpass;
+
+	// Construct the different states making up the pipeline
+
+	// Input assembly state describes how primitives are assembled
+	// This pipeline will assemble vertex data as a triangle list 
+	VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = {};
+	inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	// Rasterization state
+	VkPipelineRasterizationStateCreateInfo rasterizationState = {};
+	rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterizationState.polygonMode = VK_POLYGON_MODE_LINE;
+	rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+	rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rasterizationState.depthClampEnable = VK_FALSE;
+	rasterizationState.rasterizerDiscardEnable = VK_FALSE;
+	rasterizationState.depthBiasEnable = VK_FALSE;
+
+	//
+	// In number of fragments. GPU support.
+	// 
+
+	// lineWidthGranularity is the granularity of supported line widths. 
+	// Not all line widths in the range defined by lineWidthRange are supported.
+	// This limit specifies the granularity(or increment) between successive supported line widths.
+	//
+	// Note: Limited line width support on devices.
+	//
+
+	rasterizationState.lineWidth = 4.0f;
+
+	// Color blend state describes how blend factors are calculated (if used)
+	// We need one blend attachment state per color attachment (even if blending is not used
+	VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+
+	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+	colorBlendAttachment.blendEnable = VK_TRUE;
+	colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+	colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+	colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+
+	VkPipelineColorBlendStateCreateInfo colorBlending = {};
+	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	colorBlending.logicOpEnable = VK_FALSE;
+	colorBlending.logicOp = VK_LOGIC_OP_COPY; // Optional
+	colorBlending.attachmentCount = 1;
+	colorBlending.pAttachments = &colorBlendAttachment;
+	colorBlending.blendConstants[0] = 0.0f; // Optional
+	colorBlending.blendConstants[1] = 0.0f; // Optional
+	colorBlending.blendConstants[2] = 0.0f; // Optional
+	colorBlending.blendConstants[3] = 0.0f; // Optional
+
+											// Viewport state sets the number of viewports and scissor used in this pipeline
+											// Note: This is actually overriden by the dynamic states (see below)
+	VkPipelineViewportStateCreateInfo viewportState = {};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1;
+	viewportState.scissorCount = 1;
+
+	// Enable dynamic states
+	// Most states are baked into the pipeline, but there are still a few dynamic states that can be changed within a command buffer
+	// To be able to change these we need do specify which dynamic states will be changed using this pipeline. Their actual states are set later on in the command buffer.
+	// For this example we will set the viewport and scissor using dynamic states
+	std::vector<VkDynamicState> dynamicStateEnables;
+	dynamicStateEnables.push_back(VK_DYNAMIC_STATE_VIEWPORT);
+	dynamicStateEnables.push_back(VK_DYNAMIC_STATE_SCISSOR);
+	VkPipelineDynamicStateCreateInfo dynamicState = {};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.pDynamicStates = dynamicStateEnables.data();
+	dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStateEnables.size());
+
+	// Depth and stencil state containing depth and stencil compare and test operations
+	// We only use depth tests and want depth tests and writes to be enabled and compare with less or equal
+	VkPipelineDepthStencilStateCreateInfo depthStencilState = {};
+	depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencilState.depthTestEnable = VK_TRUE;
+	depthStencilState.depthWriteEnable = VK_TRUE;
+	depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+	depthStencilState.depthBoundsTestEnable = VK_FALSE;
+	depthStencilState.back.failOp = VK_STENCIL_OP_KEEP;
+	depthStencilState.back.passOp = VK_STENCIL_OP_KEEP;
+	depthStencilState.back.compareOp = VK_COMPARE_OP_ALWAYS;
+	depthStencilState.stencilTestEnable = VK_FALSE;
+	depthStencilState.front = depthStencilState.back;
+
+	// Multi sampling state
+	// This example does not make use fo multi sampling (for anti-aliasing), the state must still be set and passed to the pipeline
+	VkPipelineMultisampleStateCreateInfo multisampleState = {};
+	multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	multisampleState.pSampleMask = nullptr;
+
+	// Vertex input descriptions 
+	// Specifies the vertex input parameters for a pipeline
+
+	// Vertex input binding
+
+	std::array<VkVertexInputBindingDescription, 2> vertexInputBinding;
+
+	vertexInputBinding[0].binding = 0;
+	vertexInputBinding[0].stride = sizeof(arena_vertex);
+	vertexInputBinding[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+	vertexInputBinding[1].binding = 1;
+	vertexInputBinding[1].stride = sizeof(instance_data);
+	vertexInputBinding[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+
+
+	// Inpute attribute bindings describe shader attribute locations and memory layouts
+	std::array<VkVertexInputAttributeDescription, 3> vertexInputAttributs;
+	// These match the following shader layout (see triangle.vert):
+	//	layout (location = 0) in vec3 inPos;
+	//	layout (location = 1) in vec3 inColor;
+	// Attribute location 0: Position
+	vertexInputAttributs[0].binding = 0;
+	vertexInputAttributs[0].location = 0;
+	// Position attribute is three 32 bit signed (SFLOAT) floats (R32 G32 B32)
+	vertexInputAttributs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+	vertexInputAttributs[0].offset = offsetof(arena_vertex, position);
+	// Attribute location 1: Color
+	vertexInputAttributs[1].binding = 0;
+	vertexInputAttributs[1].location = 1;
+
+	// Color attribute is four 32 bit signed (SFLOAT) floats (R32 G32 B32 A32)
+	vertexInputAttributs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	vertexInputAttributs[1].offset = offsetof(arena_vertex, colorRGBA);
+
+	//  layout(location = 2) in float instanced_data;
+	vertexInputAttributs[2].binding = 1;
+	vertexInputAttributs[2].location = 2;
+	vertexInputAttributs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	vertexInputAttributs[2].offset = offsetof(instance_data, data);
+
+
+	// Vertex input state used for pipeline creation
+	VkPipelineVertexInputStateCreateInfo vertexInputState = {};
+	vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vertexInputState.vertexBindingDescriptionCount = uint32_t(vertexInputBinding.size());
+	vertexInputState.pVertexBindingDescriptions = vertexInputBinding.data();
+	vertexInputState.vertexAttributeDescriptionCount = 3;
+	vertexInputState.pVertexAttributeDescriptions = vertexInputAttributs.data();
+
+	// Shaders
+	std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
+
+	// Vertex shader
+	shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	// Set pipeline stage for this shader
+	shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	// Load binary SPIR-V shader
+	shaderStages[0].module = loadSPIRVShader(getAssetPath() + "shaders/triangle/vert.spv");
+	// Main entry point for the shader
+	shaderStages[0].pName = "main";
+	assert(shaderStages[0].module != VK_NULL_HANDLE);
+
+	// Fragment shader
+	shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	// Set pipeline stage for this shader
+	shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	// Load binary SPIR-V shader
+	shaderStages[1].module = loadSPIRVShader(getAssetPath() + "shaders/triangle/frag.spv");
+	// Main entry point for the shader
+	shaderStages[1].pName = "main";
+	assert(shaderStages[1].module != VK_NULL_HANDLE);
+
+	// Set pipeline shader stage info
+	pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+	pipelineCreateInfo.pStages = shaderStages.data();
+
+	// Assign the pipeline states to the pipeline creation info structure
+	pipelineCreateInfo.pVertexInputState = &vertexInputState;
+	pipelineCreateInfo.pInputAssemblyState = &inputAssemblyState;
+	pipelineCreateInfo.pRasterizationState = &rasterizationState;
+	pipelineCreateInfo.pColorBlendState = &colorBlending;
+	pipelineCreateInfo.pMultisampleState = &multisampleState;
+	pipelineCreateInfo.pViewportState = &viewportState;
+	pipelineCreateInfo.pDepthStencilState = &depthStencilState;
+	pipelineCreateInfo.pDynamicState = &dynamicState;
+
+	// Create rendering pipeline using the specified states
+
+	VkPipeline p;
+
+	VK_CHECK_RESULT(vkCreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineCreateInfo, nullptr, &p));
+
+	// Shader modules are no longer needed once the graphics pipeline has been created
+	vkDestroyShaderModule(_device, shaderStages[0].module, nullptr);
+	vkDestroyShaderModule(_device, shaderStages[1].module, nullptr);
+
+	return p;
+}
 
 void VulkanExampleBase::getEnabledFeatures()
 {
@@ -1157,7 +1777,7 @@ void VulkanExampleBase::windowResize()
 	vkDestroyImageView(_device, _depthStencil.view, nullptr);
 	vkDestroyImage(_device, _depthStencil.image, nullptr);
 	vkFreeMemory(_device, _depthStencil.mem, nullptr);
-	setupDepthStencil();	
+    staticSetupDepthStencil(_device, _depthFormat, _width, _height, _depthStencil, _vulkanDevice);
 	for (uint32_t i = 0; i < _frameBuffers.size(); i++) {
 		vkDestroyFramebuffer(_device, _frameBuffers[i], nullptr);
 	}
@@ -1243,8 +1863,73 @@ void VulkanExampleBase::setupSwapChain()
 
 void VulkanExampleBase::OnUpdateUIOverlay(vks::UIOverlay *overlay) {}
 
+void VulkanExampleBase::draw()
+{
+	// Get next image in the swap chain (back/front buffer)
+	VK_CHECK_RESULT(_swapChain.acquireNextImage(presentCompleteSemaphore, &_currentBuffer));
+
+	// Use a fence to wait until the command buffer has finished execution before using it again
+	VK_CHECK_RESULT(vkWaitForFences(_device, 1, &_waitFences[_currentBuffer], VK_TRUE, UINT64_MAX));
+	VK_CHECK_RESULT(vkResetFences(_device, 1, &_waitFences[_currentBuffer]));
+
+	// Pipeline stage at which the queue submission will wait (via pWaitSemaphores)
+	VkPipelineStageFlags waitStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	// The submit info structure specifices a command buffer queue submission batch
+	VkSubmitInfo submitInfo = {};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.pWaitDstStageMask = &waitStageMask;									// Pointer to the list of pipeline stages that the semaphore waits will occur at
+	submitInfo.pWaitSemaphores = &presentCompleteSemaphore;							// Semaphore(s) to wait upon before the submitted command buffer starts executing
+	submitInfo.waitSemaphoreCount = 1;												// One wait semaphore																				
+	submitInfo.pSignalSemaphores = &renderCompleteSemaphore;						// Semaphore(s) to be signaled when command buffers have completed
+	submitInfo.signalSemaphoreCount = 1;											// One signal semaphore
+	submitInfo.pCommandBuffers = &_drawCmdBuffers[_currentBuffer];					// Command buffers(s) to execute in this batch (submission)
+	submitInfo.commandBufferCount = 1;												// One command buffer
+
+
+
+
+	if (textOverlay->_visible)
+	{
+		VK_CHECK_RESULT(vkQueueSubmit(_queue, 1, &submitInfo, VK_NULL_HANDLE));
+
+		VkSubmitInfo submitInfo_text = {};
+		submitInfo_text.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo_text.commandBufferCount = 1;
+		submitInfo_text.pCommandBuffers = &textOverlay->_cmdBuffers[_currentBuffer];
+
+		VK_CHECK_RESULT(vkQueueSubmit(_queue, 1, &submitInfo_text, _waitFences[_currentBuffer]));
+		VK_CHECK_RESULT(vkQueueWaitIdle(_queue));
+
+	}
+	else
+	{
+		// Submit to the graphics queue passing a wait fence
+		VK_CHECK_RESULT(vkQueueSubmit(_queue, 1, &submitInfo, _waitFences[_currentBuffer]));
+	}
+
+
+
+	// Present the current buffer to the swap chain
+	// Pass the semaphore signaled by the command buffer submission from the submit info as the wait semaphore for swap chain presentation
+	// This ensures that the image is not presented to the windowing system until all commands have been submitted
+	VK_CHECK_RESULT(_swapChain.queuePresent(_queue, _currentBuffer, renderCompleteSemaphore));
+}
+
+
+void VulkanExampleBase::render()
+{
+	if (!_prepared)
+		return;
+
+	uint32_t ms = sessionTime->getTimeMS();
+
+	robotPark->advance(ms);
+
+	draw();
+}
+
 // A single render pass is set up with vkCreateRenderPass.
-void VulkanExampleBase::setupRenderPass(VkDevice device, VulkanSwapChain swapChain, VkFormat depthFormat, VkRenderPass& renderPass)
+void VulkanExampleBase::staticSetupRenderPass(VkDevice device, VulkanSwapChain swapChain, VkFormat depthFormat, VkRenderPass& renderPass)
 {
     // Descriptors for the attachments used by this renderpass
     std::array<VkAttachmentDescription, 2> attachmentDescriptions = {};
@@ -1338,1194 +2023,346 @@ void VulkanExampleBase::setupRenderPass(VkDevice device, VulkanSwapChain swapCha
     VK_CHECK_RESULT(vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass));
 }
 
-
-class VulkanExample : public VulkanExampleBase
+void VulkanExampleBase::viewChanged()
 {
-public:
-
-    float x_center = 0.f;
-    float y_center = 0.f;
-
-    SessionTime* sessionTime;
-    RobotPark* robotPark;
-
-    // Vertex buffer and attributes
-    struct {
-        VkDeviceMemory memory;															// Handle to the device memory for this buffer
-        VkBuffer buffer;																// Handle to the Vulkan buffer object that the memory is bound to
-    } arena_vertices;
-
-    // Index buffer
-    struct
-    {
-        VkDeviceMemory memory;
-        VkBuffer buffer;
-        uint32_t count;
-    } arena_indices;
-
-
-    // Instance data
-    struct
-    {
-        VkDeviceMemory memory;
-        VkBuffer buffer;
-        uint32_t count;
-    } arena_instance_data;
-
-
-    // Uniform buffer block object
-    struct {
-        VkDeviceMemory memory;
-        VkBuffer buffer;
-        VkDescriptorBufferInfo descriptor;
-    }  arena_uniformBufferVS;
-
-    // For simplicity we use the same uniform block layout as in the shader:
-    //
-    //	layout(set = 0, binding = 0) uniform UBO
-    //	{
-    //		mat4 projectionMatrix;
-    //		mat4 modelMatrix;
-    //		mat4 viewMatrix;
-    //	} ubo;
-    //
-    // This way we can just memcopy the ubo data to the ubo
-    // Note: You should use data types that align with the GPU in order to avoid manual padding (vec4, mat4)
-    struct {
-        glm::mat4 projectionMatrix;
-        glm::mat4 modelMatrix;
-        glm::mat4 viewMatrix;
-        glm::vec4 colorParams;
-    } arena_uboVS;
-
-    // The pipeline layout is used by a pipeline to access the descriptor sets 
-    // It defines interface (without binding any actual data) between the shader stages used by the pipeline and the shader resources
-    // A pipeline layout can be shared among multiple pipelines as long as their interfaces match
-    VkPipelineLayout arena_pipelineLayout;
-
-    // Vulkan requires to layout the graphics (and compute) pipeline states upfront
-    VkPipeline arena_pl;
-
-    // The descriptor set layout describes the shader binding layout (without actually referencing descriptor)
-    // Like the pipeline layout it's pretty much a blueprint and can be used with different descriptor sets as long as their layout matches
-    VkDescriptorSetLayout arena_descriptorSetLayout;
-
-    // The descriptor set stores the resources bound to the binding points in a shader
-    // It connects the binding points of the different shaders with the buffers and images used for those bindings
-    VkDescriptorSet arena_descriptorSet;
-
-
-    // Synchronization primitives
-    // Synchronization is an important concept of Vulkan that OpenGL mostly hid away. Getting this right is crucial to using Vulkan.
-
-    // Semaphores
-    // Used to coordinate operations within the graphics queue and ensure correct command ordering
-    VkSemaphore presentCompleteSemaphore;
-    VkSemaphore renderCompleteSemaphore;
-
-    // Fences
-    // Used to check the completion of queue operations (e.g. command buffer execution)
-    // std::vector<VkFence> waitFences;
-
-    TextOverlay* textOverlay = nullptr;
-
-    VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
-    {
-        sessionTime = new SessionTime();
-
-        uint32_t t0 = sessionTime->getTimeMS();
-
-        robotPark = new RobotPark(1000, t0);
-        _zoom = -125.0f;
-        _title = "THE GAME";
-        // Values not set here are initialized in the base class constructor
-        _settings.overlay = false;
-    }
+	// This function is called by the base example class each time the view is changed by user input
+	arena_updateUniformBuffers();
+
+	uint32_t ms = sessionTime->getTimeMS();
+
+	if (ms % 115 == 0) {
+		update_instanced_buffer();
+	}
+	updateTextOverlay();
+}
 
-    ~VulkanExample()
-    {
+void VulkanExampleBase::update_instanced_buffer() {
 
-        // Clean up used Vulkan resources 
-        // Note : Inherited destructor cleans up resources stored in base class
+	std::vector<instance_data> lcInstance;
 
-        // Clean up texture resources
+	robotPark->get_instance_data(lcInstance);
 
-        vkDestroyPipeline(_device, arena_pl, nullptr);
+	uint32_t instanceBufferSize = static_cast<uint32_t>(lcInstance.size()) * sizeof(instance_data);
 
-        vkDestroyPipelineLayout(_device, arena_pipelineLayout, nullptr);
-        vkDestroyDescriptorSetLayout(_device, arena_descriptorSetLayout, nullptr);
+	uint8_t* pData;
 
-        vkDestroyBuffer(_device, arena_vertices.buffer, nullptr);
-        vkFreeMemory(_device, arena_vertices.memory, nullptr);
+	VK_CHECK_RESULT(vkMapMemory(_device, arena_instance_data.memory, 0, instanceBufferSize, 0, (void**)&pData));
 
-        vkDestroyBuffer(_device, arena_indices.buffer, nullptr);
-        vkFreeMemory(_device, arena_indices.memory, nullptr);
+	memcpy(pData, lcInstance.data(), instanceBufferSize);
 
-        vkDestroyBuffer(_device, arena_uniformBufferVS.buffer, nullptr);
-        vkFreeMemory(_device, arena_uniformBufferVS.memory, nullptr);
+	// Unmap after data has been copied
+	vkUnmapMemory(_device, arena_instance_data.memory);
+}
 
-        vkDestroyBuffer(_device, arena_instance_data.buffer, nullptr);
-        vkFreeMemory(_device, arena_instance_data.memory, nullptr);
 
-        if (textOverlay != nullptr)
-        {
-            delete(textOverlay);
-            textOverlay = nullptr;
-        }
+// Create the Vulkan synchronization primitives used in this example
+void VulkanExampleBase::prepareSynchronizationPrimitives()
+{
+	// Semaphores (Used for correct command ordering)
+	VkSemaphoreCreateInfo semaphoreCreateInfo = {};
+	semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+	semaphoreCreateInfo.pNext = nullptr;
 
-        vkDestroySemaphore(_device, presentCompleteSemaphore, nullptr);
-        vkDestroySemaphore(_device, renderCompleteSemaphore, nullptr);
+	// Semaphore used to ensures that image presentation is complete before starting to submit again
+	VK_CHECK_RESULT(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &presentCompleteSemaphore));
 
-        for (auto& fence : _waitFences)
-        {
-            vkDestroyFence(_device, fence, nullptr);
-        }
+	// Semaphore used to ensures that all commands submitted have been finished before submitting the image to the queue
+	VK_CHECK_RESULT(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &renderCompleteSemaphore));
 
-        delete robotPark;
-        robotPark = nullptr;
-    }
+	// Fences (Used to check draw command buffer completion)
+	VkFenceCreateInfo fenceCreateInfo = {};
+	fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	// Create in signaled state so we don't wait on first render of each command buffer
+	fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+	_waitFences.resize(_drawCmdBuffers.size());
+	for (auto& fence : _waitFences)
+	{
+		VK_CHECK_RESULT(vkCreateFence(_device, &fenceCreateInfo, nullptr, &fence));
+	}
+}
 
-    void prepareTextOverlay()
-    {
-        // Load the text rendering shaders
-        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
-        shaderStages.push_back(loadShader(getAssetPath() + "shaders/textoverlay/text.vert.spv", VK_SHADER_STAGE_VERTEX_BIT));
-        shaderStages.push_back(loadShader(getAssetPath() + "shaders/textoverlay/text.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT));
 
-        textOverlay = new TextOverlay(
-            _vulkanDevice,
-            _queue,
-            _frameBuffers,
-            _swapChain.colorFormat,
-            _depthFormat,
-            &_width,
-            &_height,
-            shaderStages
-        );
-        updateTextOverlay();
-    }
+// Command buffer
 
+void VulkanExampleBase::buildSingleCommandBuffer(VkCommandBuffer cmdBuffer, VkFramebuffer fb) {
 
-    // Update the text buffer displayed by the text overlay
-    void updateTextOverlay(void)
-    {
-        textOverlay->beginTextUpdate();
+	VkCommandBufferBeginInfo cmdBufInfo = {};
+	cmdBufInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	cmdBufInfo.pNext = nullptr;
 
-        textOverlay->addText(_title, 5.0f, 5.0f, TextOverlay::alignLeft);
+	// Set clear values for all framebuffer attachments with loadOp set to clear
+	// We use two attachments (color and depth) that are cleared at the start of the subpass and as such we need to set clear values for both
+	VkClearValue clearValues[2];
+	clearValues[0].color = { { 0.1f, 0.1f, 0.3f, 1.0f } };
+	clearValues[1].depthStencil = { 1.0f, 0 };
 
-        float arena_rotationX = arena_uboVS.modelMatrix[0][0];
-        float arena_rotationY = arena_uboVS.modelMatrix[1][0];
+	VkRenderPassBeginInfo renderPassBeginInfo = {};
+	renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	renderPassBeginInfo.pNext = nullptr;
+	renderPassBeginInfo.renderPass = _renderPass;
+	renderPassBeginInfo.renderArea.offset.x = 0;
+	renderPassBeginInfo.renderArea.offset.y = 0;
+	renderPassBeginInfo.renderArea.extent.width = _width;
+	renderPassBeginInfo.renderArea.extent.height = _height;
+	renderPassBeginInfo.clearValueCount = 2;
+	renderPassBeginInfo.pClearValues = clearValues;
+	renderPassBeginInfo.framebuffer = fb;
 
-        float rAngle = std::atan2(arena_rotationY, arena_rotationX);
+	VK_CHECK_RESULT(vkBeginCommandBuffer(cmdBuffer, &cmdBufInfo));
 
-        if (rAngle < 0.f)
-        {
-            rAngle += float(2.0 * E_PI);
-        }
+	// Start the first sub pass specified in our default render pass setup by the base class
+	// This will clear the color and depth attachment
+	vkCmdBeginRenderPass(cmdBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-        rAngle /= float(2.0 * E_PI);   // [0..1]
+	// Update dynamic viewport state
+	VkViewport viewport = {};
+	viewport.height = (float)_height;
+	viewport.width = (float)_width;
+	viewport.minDepth = (float)0.0f;
+	viewport.maxDepth = (float)1.0f;
+	vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
 
-        rAngle -= 0.75f;   // Some magic to fit matrix values. Clean up.
+	// Update dynamic scissor state
+	VkRect2D scissor = {};
+	scissor.extent.width = _width;
+	scissor.extent.height = _height;
+	scissor.offset.x = 0;
+	scissor.offset.y = 0;
+	vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
 
-        if (rAngle < 0.f)
-        {
-            rAngle += 1.f;
-        }
+	// Bind descriptor sets describing shader binding points
 
-        rAngle *= float(2.0 * E_PI);
+	vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, arena_pipelineLayout, 0, 1, &arena_descriptorSet, 0, nullptr);
 
-        float fRay = rAngle * 2.0f / float(E_PI) / 0.05f;
 
-        int nRay = int(fRay + .5f);
+	// Bind the rendering pipeline
+	// The pipeline (state object) contains all states of the rendering pipeline, binding it will set all the states specified at pipeline creation time
+	vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, arena_pl);
 
-        textOverlay->addText(_title, 5.0f, 5.0f, TextOverlay::alignLeft);
+	// Bind triangle vertex buffer (contains position and colors)
+	VkDeviceSize offsets[1] = { 0 };
+	vkCmdBindVertexBuffers(cmdBuffer, 0, 1, &arena_vertices.buffer, offsets);
 
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(2) << (_frameTimer * 1000.0f) << "ms (" << _lastFPS << " fps) " << _deviceProperties.deviceName << " rotation " << rAngle << " nRay " << nRay;
-        textOverlay->addText(ss.str(), 5.0f, 25.0f, TextOverlay::alignLeft);
+	// Bind instance data
+	vkCmdBindVertexBuffers(cmdBuffer, 1, 1, &arena_instance_data.buffer, offsets);
 
-        // Display current model view matrix
-        textOverlay->addText("model view matrix", (float)_width, 5.0f, TextOverlay::alignRight);
+	// Bind triangle index buffer
+	vkCmdBindIndexBuffer(cmdBuffer, arena_indices.buffer, 0, VK_INDEX_TYPE_UINT32);
 
+	// Draw indexed triangle
+	vkCmdDrawIndexed(cmdBuffer, arena_indices.count, robotPark->instances(), 0, 0, 0);
 
-        for (uint32_t i = 0; i < 4; i++)
-        {
-            ss.str("");
-            ss << std::fixed << std::setprecision(2) << std::showpos;
-            ss << arena_uboVS.modelMatrix[0][i] << " " << arena_uboVS.modelMatrix[1][i] << " " << arena_uboVS.modelMatrix[2][i] << " " << arena_uboVS.modelMatrix[3][i];
-            textOverlay->addText(ss.str(), (float)_width, 25.0f + (float)i * 20.0f, TextOverlay::alignRight);
-        }
+	vkCmdEndRenderPass(cmdBuffer);
 
-        glm::vec3 projected = glm::project(glm::vec3(34.6281052f, 20.0473022f, 11.0037498f), arena_uboVS.modelMatrix, arena_uboVS.projectionMatrix, glm::vec4(0, 0, (float)_width, (float)_height));
+	// Ending the render pass will add an implicit barrier transitioning the frame buffer color attachment to 
+	// VK_IMAGE_LAYOUT_PRESENT_SRC_KHR for presenting it to the windowing system
 
-        // textOverlay->addText("IRAY7.I5", projected.x, projected.y, TextOverlay::alignCenter);
-        textOverlay->addText("[X]", projected.x, projected.y, TextOverlay::alignCenter);
+	VK_CHECK_RESULT(vkEndCommandBuffer(cmdBuffer));
 
-        textOverlay->addText("Info...", 5.0f, 65.0f, TextOverlay::alignLeft);
-        textOverlay->addText("---", 5.0f, 85.0f, TextOverlay::alignLeft);
+}
 
-        textOverlay->endTextUpdate();
-    }
+// Build separate command buffers for every framebuffer image
 
+void VulkanExampleBase::buildCommandBuffers()
+{
 
+	for (uint32_t iCmdBuffer = 0; iCmdBuffer < _drawCmdBuffers.size(); ++iCmdBuffer)
+	{
 
-    // Create the Vulkan synchronization primitives used in this example
-    void prepareSynchronizationPrimitives()
-    {
-        // Semaphores (Used for correct command ordering)
-        VkSemaphoreCreateInfo semaphoreCreateInfo = {};
-        semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        semaphoreCreateInfo.pNext = nullptr;
+		VkCommandBuffer cmdBuffer = _drawCmdBuffers[iCmdBuffer];
+		VkFramebuffer fb = _frameBuffers[iCmdBuffer];
 
-        // Semaphore used to ensures that image presentation is complete before starting to submit again
-        VK_CHECK_RESULT(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &presentCompleteSemaphore));
+		buildSingleCommandBuffer(cmdBuffer, fb);
+	}
+}
 
-        // Semaphore used to ensures that all commands submitted have been finished before submitting the image to the queue
-        VK_CHECK_RESULT(vkCreateSemaphore(_device, &semaphoreCreateInfo, nullptr, &renderCompleteSemaphore));
 
-        // Fences (Used to check draw command buffer completion)
-        VkFenceCreateInfo fenceCreateInfo = {};
-        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        // Create in signaled state so we don't wait on first render of each command buffer
-        fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        _waitFences.resize(_drawCmdBuffers.size());
-        for (auto& fence : _waitFences)
-        {
-            VK_CHECK_RESULT(vkCreateFence(_device, &fenceCreateInfo, nullptr, &fence));
-        }
-    }
+void VulkanExampleBase::setupDescriptorPool()
+{
+	// We need to tell the API the number of max. requested descriptors per type
+	VkDescriptorPoolSize typeCounts[1];
+	// This example only uses one descriptor type (uniform buffer) and only requests one descriptor of this type
+	typeCounts[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	typeCounts[0].descriptorCount = 1;
+	// For additional types you need to add new entries in the type count list
+	// E.g. for two combined image samplers :
+	// typeCounts[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	// typeCounts[1].descriptorCount = 2;
 
+	// Create the global descriptor pool
+	// All descriptors used in this example are allocated from this pool
+	VkDescriptorPoolCreateInfo descriptorPoolInfo = {};
+	descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	descriptorPoolInfo.pNext = nullptr;
+	descriptorPoolInfo.poolSizeCount = 1;
+	descriptorPoolInfo.pPoolSizes = typeCounts;
+	// Set the max. number of descriptor sets that can be requested from this pool (requesting beyond this limit will result in an error)
+	descriptorPoolInfo.maxSets = 1;
+
+	VK_CHECK_RESULT(vkCreateDescriptorPool(_device, &descriptorPoolInfo, nullptr, &_descriptorPool));
+}
+
+void VulkanExampleBase::arena_setupDescriptorSetLayout()
+{
+	// Setup layout of descriptors used in this example
+	// Basically connects the different shader stages to descriptors for binding uniform buffers, image samplers, etc.
+	// So every shader binding should map to one descriptor set layout binding
+
+
+
+	std::array<VkDescriptorSetLayoutBinding, 2> layoutBinding{};
+
+
+	// Binding 0: Uniform buffer (Vertex shader)
+
+	layoutBinding[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	layoutBinding[0].binding = 0;
+	layoutBinding[0].descriptorCount = 1;
+	layoutBinding[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	layoutBinding[0].pImmutableSamplers = nullptr;
 
-    // Command buffer
+	// Binding 1: Uniform buffer (Instanced data)
 
-    void buildSingleCommandBuffer(VkCommandBuffer cmdBuffer, VkFramebuffer fb) {
+	layoutBinding[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	layoutBinding[0].binding = 1;
+	layoutBinding[1].descriptorCount = 1;
+	layoutBinding[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	layoutBinding[1].pImmutableSamplers = nullptr;
 
-        VkCommandBufferBeginInfo cmdBufInfo = {};
-        cmdBufInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        cmdBufInfo.pNext = nullptr;
+	VkDescriptorSetLayoutCreateInfo descriptorLayout = {};
+	descriptorLayout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	descriptorLayout.pNext = nullptr;
+	descriptorLayout.bindingCount = uint32_t(layoutBinding.size());
+	descriptorLayout.pBindings = layoutBinding.data();
 
-        // Set clear values for all framebuffer attachments with loadOp set to clear
-        // We use two attachments (color and depth) that are cleared at the start of the subpass and as such we need to set clear values for both
-        VkClearValue clearValues[2];
-        clearValues[0].color = { { 0.1f, 0.1f, 0.3f, 1.0f } };
-        clearValues[1].depthStencil = { 1.0f, 0 };
+	VK_CHECK_RESULT(vkCreateDescriptorSetLayout(_device, &descriptorLayout, nullptr, &arena_descriptorSetLayout));
 
-        VkRenderPassBeginInfo renderPassBeginInfo = {};
-        renderPassBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassBeginInfo.pNext = nullptr;
-        renderPassBeginInfo.renderPass = _renderPass;
-        renderPassBeginInfo.renderArea.offset.x = 0;
-        renderPassBeginInfo.renderArea.offset.y = 0;
-        renderPassBeginInfo.renderArea.extent.width = _width;
-        renderPassBeginInfo.renderArea.extent.height = _height;
-        renderPassBeginInfo.clearValueCount = 2;
-        renderPassBeginInfo.pClearValues = clearValues;
-        renderPassBeginInfo.framebuffer = fb;
+	// Create the pipeline layout that is used to generate the rendering pipelines that are based on this descriptor set layout
+	// In a more complex scenario you would have different pipeline layouts for different descriptor set layouts that could be reused
+	VkPipelineLayoutCreateInfo pPipelineLayoutCreateInfo = {};
+	pPipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pPipelineLayoutCreateInfo.pNext = nullptr;
+	pPipelineLayoutCreateInfo.setLayoutCount = 1;
+	pPipelineLayoutCreateInfo.pSetLayouts = &arena_descriptorSetLayout;
 
-        VK_CHECK_RESULT(vkBeginCommandBuffer(cmdBuffer, &cmdBufInfo));
+	VK_CHECK_RESULT(vkCreatePipelineLayout(_device, &pPipelineLayoutCreateInfo, nullptr, &arena_pipelineLayout));
+}
 
-        // Start the first sub pass specified in our default render pass setup by the base class
-        // This will clear the color and depth attachment
-        vkCmdBeginRenderPass(cmdBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+void VulkanExampleBase::arena_setupDescriptorSet()
+{
+	// Allocate a new descriptor set from the global descriptor pool
+	VkDescriptorSetAllocateInfo allocInfo = {};
+	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	allocInfo.descriptorPool = _descriptorPool;
+	allocInfo.descriptorSetCount = 1;
+	allocInfo.pSetLayouts = &arena_descriptorSetLayout;
 
-        // Update dynamic viewport state
-        VkViewport viewport = {};
-        viewport.height = (float)_height;
-        viewport.width = (float)_width;
-        viewport.minDepth = (float)0.0f;
-        viewport.maxDepth = (float)1.0f;
-        vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
+	VK_CHECK_RESULT(vkAllocateDescriptorSets(_device, &allocInfo, &arena_descriptorSet));
 
-        // Update dynamic scissor state
-        VkRect2D scissor = {};
-        scissor.extent.width = _width;
-        scissor.extent.height = _height;
-        scissor.offset.x = 0;
-        scissor.offset.y = 0;
-        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+	// Update the descriptor set determining the shader binding points
+	// For every binding point used in a shader there needs to be one
+	// descriptor set matching that binding point
 
-        // Bind descriptor sets describing shader binding points
+	VkWriteDescriptorSet writeDescriptorSet = {};
 
-        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, arena_pipelineLayout, 0, 1, &arena_descriptorSet, 0, nullptr);
+	// Binding 0 : Uniform buffer
+	writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writeDescriptorSet.dstSet = arena_descriptorSet;
+	writeDescriptorSet.descriptorCount = 1;
+	writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	writeDescriptorSet.pBufferInfo = &arena_uniformBufferVS.descriptor;
+	// Binds this uniform buffer to binding point 0
+	writeDescriptorSet.dstBinding = 0;
 
+	vkUpdateDescriptorSets(_device, 1, &writeDescriptorSet, 0, nullptr);
+}
 
-        // Bind the rendering pipeline
-        // The pipeline (state object) contains all states of the rendering pipeline, binding it will set all the states specified at pipeline creation time
-        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, arena_pl);
+// Create a frame buffer for each swap chain image
+// Note: Implementation of pure virtual function in the base class and called from within VulkanExampleBase::prepare
+void VulkanExampleBase::setupFrameBuffer()
+{
+	// Create a frame buffer for every image in the swapchain
+	_frameBuffers.resize(_swapChain.imageCount);
+	for (size_t i = 0; i < _frameBuffers.size(); i++)
+	{
+		std::array<VkImageView, 2> attachments;
+		attachments[0] = _swapChain.buffers[i].view;									// Color attachment is the view of the swapchain image			
+		attachments[1] = _depthStencil.view;											// Depth/Stencil attachment is the same for all frame buffers			
 
-        // Bind triangle vertex buffer (contains position and colors)
-        VkDeviceSize offsets[1] = { 0 };
-        vkCmdBindVertexBuffers(cmdBuffer, 0, 1, &arena_vertices.buffer, offsets);
+		VkFramebufferCreateInfo frameBufferCreateInfo = {};
+		frameBufferCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		// All frame buffers use the same renderpass setup
+		frameBufferCreateInfo.renderPass = _renderPass;
+		frameBufferCreateInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+		frameBufferCreateInfo.pAttachments = attachments.data();
+		frameBufferCreateInfo.width = _width;
+		frameBufferCreateInfo.height = _height;
+		frameBufferCreateInfo.layers = 1;
+		// Create the framebuffer
+		VK_CHECK_RESULT(vkCreateFramebuffer(_device, &frameBufferCreateInfo, nullptr, &_frameBuffers[i]));
+	}
+}
 
-        // Bind instance data
-        vkCmdBindVertexBuffers(cmdBuffer, 1, 1, &arena_instance_data.buffer, offsets);
+// Render pass 
+// They describe the attachments used during rendering.
+// They may contain multiple subpasses with attachment dependencies.
 
-        // Bind triangle index buffer
-        vkCmdBindIndexBuffer(cmdBuffer, arena_indices.buffer, 0, VK_INDEX_TYPE_UINT32);
+// This allows the driver to know up-front what the rendering will look like and is a good opportunity to
+// optimize especially on tile-based renderers (with multiple subpasses)
 
-        // Draw indexed triangle
-        vkCmdDrawIndexed(cmdBuffer, arena_indices.count, robotPark->instances(), 0, 0, 0);
+// Using sub pass dependencies also adds implicit layout transitions for the attachment used,
+// so we don't need to add explicit image memory barriers to transform them
 
-        vkCmdEndRenderPass(cmdBuffer);
+// Called from within VulkanExampleBase::prepare
 
-        // Ending the render pass will add an implicit barrier transitioning the frame buffer color attachment to 
-        // VK_IMAGE_LAYOUT_PRESENT_SRC_KHR for presenting it to the windowing system
 
-        VK_CHECK_RESULT(vkEndCommandBuffer(cmdBuffer));
 
-    }
 
-    // Build separate command buffers for every framebuffer image
 
-    void buildCommandBuffers()
-    {
 
-        for (uint32_t iCmdBuffer = 0; iCmdBuffer < _drawCmdBuffers.size(); ++iCmdBuffer)
-        {
+void VulkanExampleBase::prepare_instanced_buffer() {
 
-            VkCommandBuffer cmdBuffer = _drawCmdBuffers[iCmdBuffer];
-            VkFramebuffer fb = _frameBuffers[iCmdBuffer];
+	std::vector<instance_data> lcInstance;
 
-            buildSingleCommandBuffer(cmdBuffer, fb);
-        }
-    }
+	robotPark->get_instance_data(lcInstance);
 
-    void draw()
-    {
-        // Get next image in the swap chain (back/front buffer)
-        VK_CHECK_RESULT(_swapChain.acquireNextImage(presentCompleteSemaphore, &_currentBuffer));
+	uint32_t instanceBufferSize = static_cast<uint32_t>(lcInstance.size()) * sizeof(instance_data);
 
-        // Use a fence to wait until the command buffer has finished execution before using it again
-        VK_CHECK_RESULT(vkWaitForFences(_device, 1, &_waitFences[_currentBuffer], VK_TRUE, UINT64_MAX));
-        VK_CHECK_RESULT(vkResetFences(_device, 1, &_waitFences[_currentBuffer]));
+	VkMemoryRequirements memReqs;
 
-        // Pipeline stage at which the queue submission will wait (via pWaitSemaphores)
-        VkPipelineStageFlags waitStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        // The submit info structure specifices a command buffer queue submission batch
-        VkSubmitInfo submitInfo = {};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.pWaitDstStageMask = &waitStageMask;									// Pointer to the list of pipeline stages that the semaphore waits will occur at
-        submitInfo.pWaitSemaphores = &presentCompleteSemaphore;							// Semaphore(s) to wait upon before the submitted command buffer starts executing
-        submitInfo.waitSemaphoreCount = 1;												// One wait semaphore																				
-        submitInfo.pSignalSemaphores = &renderCompleteSemaphore;						// Semaphore(s) to be signaled when command buffers have completed
-        submitInfo.signalSemaphoreCount = 1;											// One signal semaphore
-        submitInfo.pCommandBuffers = &_drawCmdBuffers[_currentBuffer];					// Command buffers(s) to execute in this batch (submission)
-        submitInfo.commandBufferCount = 1;												// One command buffer
+	// Vertex shader uniform buffer block
+	VkBufferCreateInfo bufferInfo = {};
+	VkMemoryAllocateInfo allocInfo = {};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.pNext = nullptr;
+	allocInfo.allocationSize = 0;
+	allocInfo.memoryTypeIndex = 0;
 
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = instanceBufferSize;
 
+	bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 
+	// Create a new buffer
+	VK_CHECK_RESULT(vkCreateBuffer(_device, &bufferInfo, nullptr, &arena_instance_data.buffer));
 
-        if (textOverlay->_visible)
-        {
-            VK_CHECK_RESULT(vkQueueSubmit(_queue, 1, &submitInfo, VK_NULL_HANDLE));
+	vkGetBufferMemoryRequirements(_device, arena_instance_data.buffer, &memReqs);
+	allocInfo.allocationSize = memReqs.size;
 
-            VkSubmitInfo submitInfo_text = {};
-            submitInfo_text.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submitInfo_text.commandBufferCount = 1;
-            submitInfo_text.pCommandBuffers = &textOverlay->_cmdBuffers[_currentBuffer];
 
-            VK_CHECK_RESULT(vkQueueSubmit(_queue, 1, &submitInfo_text, _waitFences[_currentBuffer]));
-            VK_CHECK_RESULT(vkQueueWaitIdle(_queue));
+	allocInfo.memoryTypeIndex = getMemoryTypeIndex(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+	// Allocate memory for the uniform buffer
+	VK_CHECK_RESULT(vkAllocateMemory(_device, &allocInfo, nullptr, &(arena_instance_data.memory)));
+	// Bind memory to buffer
+	VK_CHECK_RESULT(vkBindBufferMemory(_device, arena_instance_data.buffer, arena_instance_data.memory, 0));
 
-        }
-        else
-        {
-            // Submit to the graphics queue passing a wait fence
-            VK_CHECK_RESULT(vkQueueSubmit(_queue, 1, &submitInfo, _waitFences[_currentBuffer]));
-        }
+	update_instanced_buffer();
 
+}
 
 
-        // Present the current buffer to the swap chain
-        // Pass the semaphore signaled by the command buffer submission from the submit info as the wait semaphore for swap chain presentation
-        // This ensures that the image is not presented to the windowing system until all commands have been submitted
-        VK_CHECK_RESULT(_swapChain.queuePresent(_queue, _currentBuffer, renderCompleteSemaphore));
-    }
 
-
-
-
-    // Prepare vertex and index buffers for indexed triangles
-    // Also uploads them to device local memory using staging and initializes vertex input and attribute binding to match the vertex shader
-    void arena_prepareVertices()
-    {
-
-
-
-        // VmaMemoryUsage
-        // VMA_MEMORY_USAGE_CPU_TO_GPU
-
-
-        // Setup vertices
-
-        std::vector<arena_vertex> lcVertex;
-
-        // create_cube_arena(lcVertex);
-        create_single_cube(lcVertex);
-
-        uint32_t vertexBufferSize = static_cast<uint32_t>(lcVertex.size()) * sizeof(arena_vertex);
-
-        uint32_t num_cubes = uint32_t(lcVertex.size() / 8);
-
-        std::vector<uint32_t> lcIndex;
-
-        setup_indices(lcIndex, num_cubes);
-
-        arena_indices.count = static_cast<uint32_t>(lcIndex.size());
-        uint32_t indexBufferSize = arena_indices.count * sizeof(uint32_t);
-
-
-
-        // Static data like vertex and index buffer should be stored on the device memory 
-        // for optimal (and fastest) access by the GPU
-        //
-        // To achieve this we use so-called "staging buffers" :
-        // - Create a buffer that's visible to the host (and can be mapped)
-        // - Copy the data to this buffer
-        // - Create another buffer that's local on the device (VRAM) with the same size
-        // - Copy the data from the host to the device using a command buffer
-        // - Delete the host visible (staging) buffer
-        // - Use the device local buffers for rendering
-
-        struct StagingBuffer {
-            VkDeviceMemory memory;
-            VkBuffer buffer;
-        };
-
-
-        StagingBuffer vertices_stagingBuffer;
-        StagingBuffer indices_stagingBuffer;
-        // StagingBuffer instance_stagingBuffer;
-
-        //  Vertex buffer
-
-        // Create a host-visible buffer to copy the vertex data to (staging buffer)
-
-
-        VK_CHECK_RESULT(_vulkanDevice->createBuffer(
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            vertexBufferSize,
-            &vertices_stagingBuffer.buffer,
-            &vertices_stagingBuffer.memory,
-            lcVertex.data()));
-
-
-        // Create a device local buffer to which the (host local) vertex data will be copied (below) and which will be used for rendering
-
-        VK_CHECK_RESULT(_vulkanDevice->createBuffer(
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            vertexBufferSize,
-            &arena_vertices.buffer,
-            &arena_vertices.memory));
-
-
-        // Index buffer
-
-        // Copy index data to a buffer visible to the host (staging buffer)
-
-        VK_CHECK_RESULT(_vulkanDevice->createBuffer(
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            indexBufferSize,
-            &indices_stagingBuffer.buffer,
-            &indices_stagingBuffer.memory,
-            lcIndex.data()));
-
-        // Create destination buffer with device only visibility
-
-
-        VK_CHECK_RESULT(_vulkanDevice->createBuffer(
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            indexBufferSize,
-            &arena_indices.buffer,
-            &arena_indices.memory));
-
-
-
-        // Buffer copies have to be submitted to a queue, so we need a command buffer for them
-        // Note: Some devices offer a dedicated transfer queue (with only the transfer bit set) that may be faster when doing lots of copies
-        {
-            VkCommandBuffer copyCmd = getCommandBuffer(true);
-
-            // Put buffer region copies into command buffer
-            VkBufferCopy copyRegion = {};
-
-            // Vertex buffer
-            copyRegion.size = vertexBufferSize;
-            vkCmdCopyBuffer(copyCmd, vertices_stagingBuffer.buffer, arena_vertices.buffer, 1, &copyRegion);
-
-            // Index buffer
-            copyRegion.size = indexBufferSize;
-            vkCmdCopyBuffer(copyCmd, indices_stagingBuffer.buffer, arena_indices.buffer, 1, &copyRegion);
-
-            // Instance data
-            //copyRegion.size = instanceBufferSize;
-            //vkCmdCopyBuffer(copyCmd, instance_stagingBuffer.buffer, arena_instance_data.buffer, 1, &copyRegion);
-
-            // Flushing the command buffer will also submit it to the queue and uses a fence to ensure that all commands have been executed before returning
-            flushCommandBuffer(copyCmd);
-        }
-
-        // Destroy staging buffers
-        // Note: Staging buffer must not be deleted before the copies have been submitted and executed
-        vkDestroyBuffer(_device, vertices_stagingBuffer.buffer, nullptr);
-        vkFreeMemory(_device, vertices_stagingBuffer.memory, nullptr);
-        vkDestroyBuffer(_device, indices_stagingBuffer.buffer, nullptr);
-        vkFreeMemory(_device, indices_stagingBuffer.memory, nullptr);
-
-        //vkDestroyBuffer(device, instance_stagingBuffer.buffer, nullptr);
-        //vkFreeMemory(device, instance_stagingBuffer.memory, nullptr);
-
-
-    }
-
-    void setupDescriptorPool()
-    {
-        // We need to tell the API the number of max. requested descriptors per type
-        VkDescriptorPoolSize typeCounts[1];
-        // This example only uses one descriptor type (uniform buffer) and only requests one descriptor of this type
-        typeCounts[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        typeCounts[0].descriptorCount = 1;
-        // For additional types you need to add new entries in the type count list
-        // E.g. for two combined image samplers :
-        // typeCounts[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        // typeCounts[1].descriptorCount = 2;
-
-        // Create the global descriptor pool
-        // All descriptors used in this example are allocated from this pool
-        VkDescriptorPoolCreateInfo descriptorPoolInfo = {};
-        descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        descriptorPoolInfo.pNext = nullptr;
-        descriptorPoolInfo.poolSizeCount = 1;
-        descriptorPoolInfo.pPoolSizes = typeCounts;
-        // Set the max. number of descriptor sets that can be requested from this pool (requesting beyond this limit will result in an error)
-        descriptorPoolInfo.maxSets = 1;
-
-        VK_CHECK_RESULT(vkCreateDescriptorPool(_device, &descriptorPoolInfo, nullptr, &_descriptorPool));
-    }
-
-    void arena_setupDescriptorSetLayout()
-    {
-        // Setup layout of descriptors used in this example
-        // Basically connects the different shader stages to descriptors for binding uniform buffers, image samplers, etc.
-        // So every shader binding should map to one descriptor set layout binding
-
-
-
-        std::array<VkDescriptorSetLayoutBinding, 2> layoutBinding{};
-
-
-        // Binding 0: Uniform buffer (Vertex shader)
-
-        layoutBinding[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        layoutBinding[0].binding = 0;
-        layoutBinding[0].descriptorCount = 1;
-        layoutBinding[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        layoutBinding[0].pImmutableSamplers = nullptr;
-
-        // Binding 1: Uniform buffer (Instanced data)
-
-        layoutBinding[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        layoutBinding[0].binding = 1;
-        layoutBinding[1].descriptorCount = 1;
-        layoutBinding[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        layoutBinding[1].pImmutableSamplers = nullptr;
-
-        VkDescriptorSetLayoutCreateInfo descriptorLayout = {};
-        descriptorLayout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        descriptorLayout.pNext = nullptr;
-        descriptorLayout.bindingCount = uint32_t(layoutBinding.size());
-        descriptorLayout.pBindings = layoutBinding.data();
-
-        VK_CHECK_RESULT(vkCreateDescriptorSetLayout(_device, &descriptorLayout, nullptr, &arena_descriptorSetLayout));
-
-        // Create the pipeline layout that is used to generate the rendering pipelines that are based on this descriptor set layout
-        // In a more complex scenario you would have different pipeline layouts for different descriptor set layouts that could be reused
-        VkPipelineLayoutCreateInfo pPipelineLayoutCreateInfo = {};
-        pPipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pPipelineLayoutCreateInfo.pNext = nullptr;
-        pPipelineLayoutCreateInfo.setLayoutCount = 1;
-        pPipelineLayoutCreateInfo.pSetLayouts = &arena_descriptorSetLayout;
-
-        VK_CHECK_RESULT(vkCreatePipelineLayout(_device, &pPipelineLayoutCreateInfo, nullptr, &arena_pipelineLayout));
-    }
-
-    void arena_setupDescriptorSet()
-    {
-        // Allocate a new descriptor set from the global descriptor pool
-        VkDescriptorSetAllocateInfo allocInfo = {};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = _descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &arena_descriptorSetLayout;
-
-        VK_CHECK_RESULT(vkAllocateDescriptorSets(_device, &allocInfo, &arena_descriptorSet));
-
-        // Update the descriptor set determining the shader binding points
-        // For every binding point used in a shader there needs to be one
-        // descriptor set matching that binding point
-
-        VkWriteDescriptorSet writeDescriptorSet = {};
-
-        // Binding 0 : Uniform buffer
-        writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writeDescriptorSet.dstSet = arena_descriptorSet;
-        writeDescriptorSet.descriptorCount = 1;
-        writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        writeDescriptorSet.pBufferInfo = &arena_uniformBufferVS.descriptor;
-        // Binds this uniform buffer to binding point 0
-        writeDescriptorSet.dstBinding = 0;
-
-        vkUpdateDescriptorSets(_device, 1, &writeDescriptorSet, 0, nullptr);
-    }
-
-    // Create the depth (and stencil) buffer attachments used by our framebuffers
-    // Note: Override of virtual function in the base class and called from within VulkanExampleBase::prepare
-    void setupDepthStencil()
-    {
-        // Create an optimal image used as the depth stencil attachment
-        VkImageCreateInfo image = {};
-        image.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        image.imageType = VK_IMAGE_TYPE_2D;
-        image.format = _depthFormat;
-        // Use example's height and width
-        image.extent = { _width, _height, 1 };
-        image.mipLevels = 1;
-        image.arrayLayers = 1;
-        image.samples = VK_SAMPLE_COUNT_1_BIT;
-        image.tiling = VK_IMAGE_TILING_OPTIMAL;
-        image.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        image.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        VK_CHECK_RESULT(vkCreateImage(_device, &image, nullptr, &_depthStencil.image));
-
-        // Allocate memory for the image (device local) and bind it to our image
-        VkMemoryAllocateInfo memAlloc = {};
-        memAlloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        VkMemoryRequirements memReqs;
-        vkGetImageMemoryRequirements(_device, _depthStencil.image, &memReqs);
-        memAlloc.allocationSize = memReqs.size;
-        memAlloc.memoryTypeIndex = getMemoryTypeIndex(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        VK_CHECK_RESULT(vkAllocateMemory(_device, &memAlloc, nullptr, &_depthStencil.mem));
-        VK_CHECK_RESULT(vkBindImageMemory(_device, _depthStencil.image, _depthStencil.mem, 0));
-
-        // Create a view for the depth stencil image
-        // Images aren't directly accessed in Vulkan, but rather through views described by a subresource range
-        // This allows for multiple views of one image with differing ranges (e.g. for different layers)
-        VkImageViewCreateInfo depthStencilView = {};
-        depthStencilView.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        depthStencilView.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        depthStencilView.format = _depthFormat;
-        depthStencilView.subresourceRange = {};
-        depthStencilView.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-        depthStencilView.subresourceRange.baseMipLevel = 0;
-        depthStencilView.subresourceRange.levelCount = 1;
-        depthStencilView.subresourceRange.baseArrayLayer = 0;
-        depthStencilView.subresourceRange.layerCount = 1;
-        depthStencilView.image = _depthStencil.image;
-        VK_CHECK_RESULT(vkCreateImageView(_device, &depthStencilView, nullptr, &_depthStencil.view));
-    }
-
-    // Create a frame buffer for each swap chain image
-    // Note: Implementation of pure virtual function in the base class and called from within VulkanExampleBase::prepare
-    void setupFrameBuffer()
-    {
-        // Create a frame buffer for every image in the swapchain
-        _frameBuffers.resize(_swapChain.imageCount);
-        for (size_t i = 0; i < _frameBuffers.size(); i++)
-        {
-            std::array<VkImageView, 2> attachments;
-            attachments[0] = _swapChain.buffers[i].view;									// Color attachment is the view of the swapchain image			
-            attachments[1] = _depthStencil.view;											// Depth/Stencil attachment is the same for all frame buffers			
-
-            VkFramebufferCreateInfo frameBufferCreateInfo = {};
-            frameBufferCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            // All frame buffers use the same renderpass setup
-            frameBufferCreateInfo.renderPass = _renderPass;
-            frameBufferCreateInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-            frameBufferCreateInfo.pAttachments = attachments.data();
-            frameBufferCreateInfo.width = _width;
-            frameBufferCreateInfo.height = _height;
-            frameBufferCreateInfo.layers = 1;
-            // Create the framebuffer
-            VK_CHECK_RESULT(vkCreateFramebuffer(_device, &frameBufferCreateInfo, nullptr, &_frameBuffers[i]));
-        }
-    }
-
-    // Render pass 
-    // They describe the attachments used during rendering.
-    // They may contain multiple subpasses with attachment dependencies.
-
-    // This allows the driver to know up-front what the rendering will look like and is a good opportunity to
-    // optimize especially on tile-based renderers (with multiple subpasses)
-
-    // Using sub pass dependencies also adds implicit layout transitions for the attachment used,
-    // so we don't need to add explicit image memory barriers to transform them
-
-    // Called from within VulkanExampleBase::prepare
-
-    
-
-    // Vulkan loads it's shaders from an immediate binary representation called SPIR-V
-    // Shaders are compiled offline from e.g. GLSL using the reference glslang compiler
-    // This function loads such a shader from a binary file and returns a shader module structure
-    VkShaderModule loadSPIRVShader(std::string filename)
-    {
-        size_t shaderSize;
-        char* shaderCode = NULL;
-
-        std::ifstream is(filename, std::ios::binary | std::ios::in | std::ios::ate);
-
-        if (is.is_open())
-        {
-            shaderSize = is.tellg();
-            is.seekg(0, std::ios::beg);
-            // Copy file contents into a buffer
-            shaderCode = new char[shaderSize];
-            is.read(shaderCode, shaderSize);
-            is.close();
-            assert(shaderSize > 0);
-        }
-
-        if (shaderCode)
-        {
-            // Create a new shader module that will be used for pipeline creation
-            VkShaderModuleCreateInfo moduleCreateInfo{};
-            moduleCreateInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            moduleCreateInfo.codeSize = shaderSize;
-            moduleCreateInfo.pCode = (uint32_t*)shaderCode;
-
-            VkShaderModule shaderModule;
-            VK_CHECK_RESULT(vkCreateShaderModule(_device, &moduleCreateInfo, NULL, &shaderModule));
-
-            delete[] shaderCode;
-
-            return shaderModule;
-        }
-        else
-        {
-            std::cerr << "Error: Could not open shader file \"" << filename << "\"" << std::endl;
-            return VK_NULL_HANDLE;
-        }
-    }
-
-    VkPipeline arena_createPipeline(VkRenderPass rpass, VkPipelineLayout pl_layout)
-    {
-        // Create a graphics pipeline
-
-        // A big setup ending in one vk call: vkCreateGraphicsPipelines
-
-        VkGraphicsPipelineCreateInfo pipelineCreateInfo = {};
-        pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-
-        pipelineCreateInfo.layout = pl_layout;
-        pipelineCreateInfo.renderPass = rpass;
-
-        // Construct the different states making up the pipeline
-
-        // Input assembly state describes how primitives are assembled
-        // This pipeline will assemble vertex data as a triangle list 
-        VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = {};
-        inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-        // Rasterization state
-        VkPipelineRasterizationStateCreateInfo rasterizationState = {};
-        rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterizationState.polygonMode = VK_POLYGON_MODE_LINE;
-        rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        rasterizationState.depthClampEnable = VK_FALSE;
-        rasterizationState.rasterizerDiscardEnable = VK_FALSE;
-        rasterizationState.depthBiasEnable = VK_FALSE;
-
-        //
-        // In number of fragments. GPU support.
-        // 
-
-        // lineWidthGranularity is the granularity of supported line widths. 
-        // Not all line widths in the range defined by lineWidthRange are supported.
-        // This limit specifies the granularity(or increment) between successive supported line widths.
-        //
-        // Note: Limited line width support on devices.
-        //
-
-        rasterizationState.lineWidth = 4.0f;
-
-        // Color blend state describes how blend factors are calculated (if used)
-        // We need one blend attachment state per color attachment (even if blending is not used
-        VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
-
-        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
-        colorBlendAttachment.blendEnable = VK_TRUE;
-        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-
-
-        VkPipelineColorBlendStateCreateInfo colorBlending = {};
-        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        colorBlending.logicOpEnable = VK_FALSE;
-        colorBlending.logicOp = VK_LOGIC_OP_COPY; // Optional
-        colorBlending.attachmentCount = 1;
-        colorBlending.pAttachments = &colorBlendAttachment;
-        colorBlending.blendConstants[0] = 0.0f; // Optional
-        colorBlending.blendConstants[1] = 0.0f; // Optional
-        colorBlending.blendConstants[2] = 0.0f; // Optional
-        colorBlending.blendConstants[3] = 0.0f; // Optional
-
-                                                // Viewport state sets the number of viewports and scissor used in this pipeline
-                                                // Note: This is actually overriden by the dynamic states (see below)
-        VkPipelineViewportStateCreateInfo viewportState = {};
-        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        viewportState.viewportCount = 1;
-        viewportState.scissorCount = 1;
-
-        // Enable dynamic states
-        // Most states are baked into the pipeline, but there are still a few dynamic states that can be changed within a command buffer
-        // To be able to change these we need do specify which dynamic states will be changed using this pipeline. Their actual states are set later on in the command buffer.
-        // For this example we will set the viewport and scissor using dynamic states
-        std::vector<VkDynamicState> dynamicStateEnables;
-        dynamicStateEnables.push_back(VK_DYNAMIC_STATE_VIEWPORT);
-        dynamicStateEnables.push_back(VK_DYNAMIC_STATE_SCISSOR);
-        VkPipelineDynamicStateCreateInfo dynamicState = {};
-        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamicState.pDynamicStates = dynamicStateEnables.data();
-        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStateEnables.size());
-
-        // Depth and stencil state containing depth and stencil compare and test operations
-        // We only use depth tests and want depth tests and writes to be enabled and compare with less or equal
-        VkPipelineDepthStencilStateCreateInfo depthStencilState = {};
-        depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depthStencilState.depthTestEnable = VK_TRUE;
-        depthStencilState.depthWriteEnable = VK_TRUE;
-        depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-        depthStencilState.depthBoundsTestEnable = VK_FALSE;
-        depthStencilState.back.failOp = VK_STENCIL_OP_KEEP;
-        depthStencilState.back.passOp = VK_STENCIL_OP_KEEP;
-        depthStencilState.back.compareOp = VK_COMPARE_OP_ALWAYS;
-        depthStencilState.stencilTestEnable = VK_FALSE;
-        depthStencilState.front = depthStencilState.back;
-
-        // Multi sampling state
-        // This example does not make use fo multi sampling (for anti-aliasing), the state must still be set and passed to the pipeline
-        VkPipelineMultisampleStateCreateInfo multisampleState = {};
-        multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        multisampleState.pSampleMask = nullptr;
-
-        // Vertex input descriptions 
-        // Specifies the vertex input parameters for a pipeline
-
-        // Vertex input binding
-
-        std::array<VkVertexInputBindingDescription, 2> vertexInputBinding;
-
-        vertexInputBinding[0].binding = 0;
-        vertexInputBinding[0].stride = sizeof(arena_vertex);
-        vertexInputBinding[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-        vertexInputBinding[1].binding = 1;
-        vertexInputBinding[1].stride = sizeof(instance_data);
-        vertexInputBinding[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-
-
-        // Inpute attribute bindings describe shader attribute locations and memory layouts
-        std::array<VkVertexInputAttributeDescription, 3> vertexInputAttributs;
-        // These match the following shader layout (see triangle.vert):
-        //	layout (location = 0) in vec3 inPos;
-        //	layout (location = 1) in vec3 inColor;
-        // Attribute location 0: Position
-        vertexInputAttributs[0].binding = 0;
-        vertexInputAttributs[0].location = 0;
-        // Position attribute is three 32 bit signed (SFLOAT) floats (R32 G32 B32)
-        vertexInputAttributs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-        vertexInputAttributs[0].offset = offsetof(arena_vertex, position);
-        // Attribute location 1: Color
-        vertexInputAttributs[1].binding = 0;
-        vertexInputAttributs[1].location = 1;
-
-        // Color attribute is four 32 bit signed (SFLOAT) floats (R32 G32 B32 A32)
-        vertexInputAttributs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        vertexInputAttributs[1].offset = offsetof(arena_vertex, colorRGBA);
-
-        //  layout(location = 2) in float instanced_data;
-        vertexInputAttributs[2].binding = 1;
-        vertexInputAttributs[2].location = 2;
-        vertexInputAttributs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        vertexInputAttributs[2].offset = offsetof(instance_data, data);
-
-
-        // Vertex input state used for pipeline creation
-        VkPipelineVertexInputStateCreateInfo vertexInputState = {};
-        vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputState.vertexBindingDescriptionCount = uint32_t(vertexInputBinding.size());
-        vertexInputState.pVertexBindingDescriptions = vertexInputBinding.data();
-        vertexInputState.vertexAttributeDescriptionCount = 3;
-        vertexInputState.pVertexAttributeDescriptions = vertexInputAttributs.data();
-
-        // Shaders
-        std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
-
-        // Vertex shader
-        shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        // Set pipeline stage for this shader
-        shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        // Load binary SPIR-V shader
-        shaderStages[0].module = loadSPIRVShader(getAssetPath() + "shaders/triangle/vert.spv");
-        // Main entry point for the shader
-        shaderStages[0].pName = "main";
-        assert(shaderStages[0].module != VK_NULL_HANDLE);
-
-        // Fragment shader
-        shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        // Set pipeline stage for this shader
-        shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        // Load binary SPIR-V shader
-        shaderStages[1].module = loadSPIRVShader(getAssetPath() + "shaders/triangle/frag.spv");
-        // Main entry point for the shader
-        shaderStages[1].pName = "main";
-        assert(shaderStages[1].module != VK_NULL_HANDLE);
-
-        // Set pipeline shader stage info
-        pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-        pipelineCreateInfo.pStages = shaderStages.data();
-
-        // Assign the pipeline states to the pipeline creation info structure
-        pipelineCreateInfo.pVertexInputState = &vertexInputState;
-        pipelineCreateInfo.pInputAssemblyState = &inputAssemblyState;
-        pipelineCreateInfo.pRasterizationState = &rasterizationState;
-        pipelineCreateInfo.pColorBlendState = &colorBlending;
-        pipelineCreateInfo.pMultisampleState = &multisampleState;
-        pipelineCreateInfo.pViewportState = &viewportState;
-        pipelineCreateInfo.pDepthStencilState = &depthStencilState;
-        pipelineCreateInfo.pDynamicState = &dynamicState;
-
-        // Create rendering pipeline using the specified states
-
-        VkPipeline p;
-
-        VK_CHECK_RESULT(vkCreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineCreateInfo, nullptr, &p));
-
-        // Shader modules are no longer needed once the graphics pipeline has been created
-        vkDestroyShaderModule(_device, shaderStages[0].module, nullptr);
-        vkDestroyShaderModule(_device, shaderStages[1].module, nullptr);
-
-        return p;
-    }
-
-    void prepare_instanced_buffer() {
-
-        std::vector<instance_data> lcInstance;
-
-        robotPark->get_instance_data(lcInstance);
-
-        uint32_t instanceBufferSize = static_cast<uint32_t>(lcInstance.size()) * sizeof(instance_data);
-
-        VkMemoryRequirements memReqs;
-
-        // Vertex shader uniform buffer block
-        VkBufferCreateInfo bufferInfo = {};
-        VkMemoryAllocateInfo allocInfo = {};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.pNext = nullptr;
-        allocInfo.allocationSize = 0;
-        allocInfo.memoryTypeIndex = 0;
-
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = instanceBufferSize;
-
-        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-
-        // Create a new buffer
-        VK_CHECK_RESULT(vkCreateBuffer(_device, &bufferInfo, nullptr, &arena_instance_data.buffer));
-
-        vkGetBufferMemoryRequirements(_device, arena_instance_data.buffer, &memReqs);
-        allocInfo.allocationSize = memReqs.size;
-
-
-        allocInfo.memoryTypeIndex = getMemoryTypeIndex(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-        // Allocate memory for the uniform buffer
-        VK_CHECK_RESULT(vkAllocateMemory(_device, &allocInfo, nullptr, &(arena_instance_data.memory)));
-        // Bind memory to buffer
-        VK_CHECK_RESULT(vkBindBufferMemory(_device, arena_instance_data.buffer, arena_instance_data.memory, 0));
-
-        update_instanced_buffer();
-
-    }
-
-    void update_instanced_buffer() {
-
-        std::vector<instance_data> lcInstance;
-
-        robotPark->get_instance_data(lcInstance);
-
-        uint32_t instanceBufferSize = static_cast<uint32_t>(lcInstance.size()) * sizeof(instance_data);
-
-        uint8_t* pData;
-
-        VK_CHECK_RESULT(vkMapMemory(_device, arena_instance_data.memory, 0, instanceBufferSize, 0, (void**)&pData));
-
-        memcpy(pData, lcInstance.data(), instanceBufferSize);
-
-        // Unmap after data has been copied
-        vkUnmapMemory(_device, arena_instance_data.memory);
-    }
-
-
-
-    void arena_prepareUniformBuffers()
-    {
-        // Prepare and initialize a uniform buffer block containing shader uniforms
-        // Single uniforms like in OpenGL are no longer present in Vulkan. All Shader uniforms are passed via uniform buffer blocks
-        VkMemoryRequirements memReqs;
-
-        // Vertex shader uniform buffer block
-        VkBufferCreateInfo bufferInfo = {};
-        VkMemoryAllocateInfo allocInfo = {};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.pNext = nullptr;
-        allocInfo.allocationSize = 0;
-        allocInfo.memoryTypeIndex = 0;
-
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = sizeof(arena_uboVS);
-        // This buffer will be used as a uniform buffer
-        bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-
-        // Create a new buffer
-        VK_CHECK_RESULT(vkCreateBuffer(_device, &bufferInfo, nullptr, &arena_uniformBufferVS.buffer));
-        // Get memory requirements including size, alignment and memory type 
-        vkGetBufferMemoryRequirements(_device, arena_uniformBufferVS.buffer, &memReqs);
-        allocInfo.allocationSize = memReqs.size;
-        // Get the memory type index that supports host visibile memory access
-        // Most implementations offer multiple memory types and selecting the correct one to allocate memory from is crucial
-        // We also want the buffer to be host coherent so we don't have to flush (or sync after every update.
-        // Note: This may affect performance so you might not want to do this in a real world application that updates buffers on a regular base
-        allocInfo.memoryTypeIndex = getMemoryTypeIndex(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        // Allocate memory for the uniform buffer
-        VK_CHECK_RESULT(vkAllocateMemory(_device, &allocInfo, nullptr, &(arena_uniformBufferVS.memory)));
-        // Bind memory to buffer
-        VK_CHECK_RESULT(vkBindBufferMemory(_device, arena_uniformBufferVS.buffer, arena_uniformBufferVS.memory, 0));
-
-        // Store information in the uniform's descriptor that is used by the descriptor set
-        arena_uniformBufferVS.descriptor.buffer = arena_uniformBufferVS.buffer;
-        arena_uniformBufferVS.descriptor.offset = 0;
-        arena_uniformBufferVS.descriptor.range = sizeof(arena_uboVS);
-
-        arena_updateUniformBuffers();
-    }
-
-    void arena_updateUniformBuffers()
-    {
-        // Update matrices
-        arena_uboVS.projectionMatrix = glm::perspective(glm::radians(35.0f), (float)_width / (float)_height, 0.1f, 4096.0f);
-
-        arena_uboVS.modelMatrix = glm::mat4(1.0f);
-
-
-        if (_camera.keys.up) {
-            y_center -= 0.01f;
-        }
-
-        if (_camera.keys.down) {
-            y_center += 0.01f;
-        }
-
-        if (_camera.keys.left) {
-            x_center -= 0.01f;
-        }
-
-        if (_camera.keys.right) {
-            x_center += 0.01f;
-        }
-
-
-
-        arena_uboVS.viewMatrix = glm::lookAt(glm::vec3(x_center, y_center, 150), glm::vec3(x_center, y_center, 0), glm::vec3(0, 1, 0));
-
-
-        float ms = float(sessionTime->getTimeMS());
-
-        // Set color params
-        arena_uboVS.colorParams = glm::vec4(ms, 0, 0, 0);
-
-
-        // Map uniform buffer and update it
-
-        uint8_t* pData;
-
-        VK_CHECK_RESULT(vkMapMemory(_device, arena_uniformBufferVS.memory, 0, sizeof(arena_uboVS), 0, (void**)&pData));
-
-        memcpy(pData, &arena_uboVS, sizeof(arena_uboVS));
-
-        // Unmap after data has been copied
-        // Note: Since we requested a host coherent memory type for the uniform buffer, the write is instantly visible to the GPU
-
-        vkUnmapMemory(_device, arena_uniformBufferVS.memory);
-    }
-
-    void prepare()
-    {
-        VulkanExampleBase::prepare();
-        prepareSynchronizationPrimitives();
-        arena_prepareVertices();
-        prepare_instanced_buffer();
-        arena_prepareUniformBuffers();
-        arena_setupDescriptorSetLayout();
-
-        // Renderpass this pipeline is attached to
-        // The layout used for this pipeline (can be shared among multiple pipelines using the same layout)
-        arena_pl = arena_createPipeline(_renderPass, arena_pipelineLayout);
-        setupDescriptorPool();
-        arena_setupDescriptorSet();
-        buildCommandBuffers();
-        prepareTextOverlay();
-        _prepared = true;
-    }
-
-
-
-    virtual void render()
-    {
-        if (!_prepared)
-            return;
-
-        uint32_t ms = sessionTime->getTimeMS();
-
-        robotPark->advance(ms);
-
-        draw();
-    }
-
-    virtual void viewChanged()
-    {
-        // This function is called by the base example class each time the view is changed by user input
-        arena_updateUniformBuffers();
-
-        uint32_t ms = sessionTime->getTimeMS();
-
-        if (ms % 115 == 0) {
-            update_instanced_buffer();
-        }
-        updateTextOverlay();
-    }
-
-
-
-
-
-};
-
-
-VulkanExample* vulkanExample;
+VulkanExampleBase* vulkanExample;
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -2567,8 +2404,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLin
 
     load_numpy();
 
-    for (size_t i = 0; i < __argc; i++) { VulkanExample::_args.push_back(__argv[i]); };
-    vulkanExample = new VulkanExample();
+    for (size_t i = 0; i < __argc; i++) { VulkanExampleBase::_args.push_back(__argv[i]); };
+    vulkanExample = new VulkanExampleBase(ENABLE_VALIDATION);
 
     vulkanExample->initVulkan();
     vulkanExample->setupWindow(hInstance, WndProc);

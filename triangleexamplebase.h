@@ -40,6 +40,12 @@
 #include "camera.hpp"
 #include "benchmark.hpp"
 
+#include "SessionTime.h"
+#include "RobotPark.h"
+#include "TextOverlay.h"
+
+
+
 class VulkanExampleBase
 {
 private:	
@@ -189,6 +195,97 @@ public:
 	glm::vec3 _cameraPos = glm::vec3();
 	glm::vec2 _mousePos;
 
+	float x_center = 0.f;
+	float y_center = 0.f;
+
+	SessionTime* sessionTime;
+	RobotPark* robotPark;
+
+
+	// Vertex buffer and attributes
+	struct {
+		VkDeviceMemory memory;															// Handle to the device memory for this buffer
+		VkBuffer buffer;																// Handle to the Vulkan buffer object that the memory is bound to
+	} arena_vertices;
+
+	// Index buffer
+	struct
+	{
+		VkDeviceMemory memory;
+		VkBuffer buffer;
+		uint32_t count;
+	} arena_indices;
+
+
+	// Instance data
+	struct
+	{
+		VkDeviceMemory memory;
+		VkBuffer buffer;
+		uint32_t count;
+	} arena_instance_data;
+
+
+	// Uniform buffer block object
+	struct {
+		VkDeviceMemory memory;
+		VkBuffer buffer;
+		VkDescriptorBufferInfo descriptor;
+	}  arena_uniformBufferVS;
+
+	// For simplicity we use the same uniform block layout as in the shader:
+	//
+	//	layout(set = 0, binding = 0) uniform UBO
+	//	{
+	//		mat4 projectionMatrix;
+	//		mat4 modelMatrix;
+	//		mat4 viewMatrix;
+	//	} ubo;
+	//
+	// This way we can just memcopy the ubo data to the ubo
+	// Note: You should use data types that align with the GPU in order to avoid manual padding (vec4, mat4)
+	struct {
+		glm::mat4 projectionMatrix;
+		glm::mat4 modelMatrix;
+		glm::mat4 viewMatrix;
+		glm::vec4 colorParams;
+	} arena_uboVS;
+
+	// The pipeline layout is used by a pipeline to access the descriptor sets 
+	// It defines interface (without binding any actual data) between the shader stages used by the pipeline and the shader resources
+	// A pipeline layout can be shared among multiple pipelines as long as their interfaces match
+	VkPipelineLayout arena_pipelineLayout;
+
+	// Vulkan requires to layout the graphics (and compute) pipeline states upfront
+	VkPipeline arena_pl;
+
+	// The descriptor set layout describes the shader binding layout (without actually referencing descriptor)
+	// Like the pipeline layout it's pretty much a blueprint and can be used with different descriptor sets as long as their layout matches
+	VkDescriptorSetLayout arena_descriptorSetLayout;
+
+	// The descriptor set stores the resources bound to the binding points in a shader
+	// It connects the binding points of the different shaders with the buffers and images used for those bindings
+	VkDescriptorSet arena_descriptorSet;
+
+
+	// Synchronization primitives
+	// Synchronization is an important concept of Vulkan that OpenGL mostly hid away. Getting this right is crucial to using Vulkan.
+
+	// Semaphores
+	// Used to coordinate operations within the graphics queue and ensure correct command ordering
+	VkSemaphore presentCompleteSemaphore;
+	VkSemaphore renderCompleteSemaphore;
+
+	// Fences
+	// Used to check the completion of queue operations (e.g. command buffer execution)
+	// std::vector<VkFence> waitFences;
+
+	TextOverlay* textOverlay = nullptr;
+
+
+
+
+
 	// For per frame color animation
 	float _colorParam = 1.0f;
 
@@ -197,12 +294,16 @@ public:
 	std::string _name = "vulkanExample";
 	uint32_t _apiVersion = VK_API_VERSION_1_0;
 
-	struct 
+	typedef struct
 	{
 		VkImage image;
 		VkDeviceMemory mem;
 		VkImageView view;
-	} _depthStencil;
+	} depthStencil_t;
+	
+	
+	depthStencil_t _depthStencil;
+
 
 	struct {
 		glm::vec2 axisLeft = glm::vec2(0.0f);
@@ -241,14 +342,38 @@ public:
 	virtual VkResult createInstance(bool enableValidation);
 
 
-	static void setupRenderPass(VkDevice device, VulkanSwapChain swapChain, VkFormat depthFormat, VkRenderPass& renderPass);
+	static void staticSetupRenderPass(VkDevice device, VulkanSwapChain swapChain, VkFormat depthFormat, VkRenderPass& renderPass);
 
-	// Pure virtual render function (override in derived class)
-	virtual void render() = 0;
+	static void staticSetupDepthStencil(VkDevice device, VkFormat depthFormat, uint32_t width, uint32_t height, depthStencil_t& depthStencil, vks::VulkanDevice* vulkanDevice);
+
+	VkPipeline arena_createPipeline(VkRenderPass rpass, VkPipelineLayout pl_layout);
+	void arena_prepareVertices();
+	void arena_prepareUniformBuffers();
+	void arena_updateUniformBuffers();
+
+	void updateTextOverlay();
+	void prepareTextOverlay();
+
+	void update_instanced_buffer();
+
+	void prepareSynchronizationPrimitives();
+	void buildSingleCommandBuffer(VkCommandBuffer cmdBuffer, VkFramebuffer fb);
+	void buildCommandBuffers();
+	void setupDescriptorPool();
+	void arena_setupDescriptorSetLayout();
+
+	void arena_setupDescriptorSet();
+	void setupFrameBuffer();
+	void prepare_instanced_buffer();
+
+	VkShaderModule loadSPIRVShader(std::string filename);
+
+	void draw();
+	void render();
 	// Called when view change occurs
 	// Can be overriden in derived class to e.g. update uniform buffers 
 	// Containing view dependant matrices
-	virtual void viewChanged();
+	void viewChanged();
 	/** @brief (Virtual) Called after a key was pressed, can be used to do custom key handling */
 	virtual void keyPressed(uint32_t);
 	/** @brief (Virtual) Called after th mouse cursor moved and before internal events (like camera rotation) is handled */
@@ -259,18 +384,15 @@ public:
 	// Pure virtual function to be overriden by the dervice class
 	// Called in case of an event where e.g. the framebuffer has to be rebuild and thus
 	// all command buffers that may reference this
-	virtual void buildCommandBuffers();
 
 	//void createSynchronizationPrimitives();
 
 	// Creates a new (graphics) command pool object storing command buffers
 	void createCommandPool();
-	// Setup default depth and stencil views
-	virtual void setupDepthStencil();
+	
 	
 	// Create framebuffers for all requested swap chain images
 	// Implement in derived class to setup a custom framebuffer (e.g. for MSAA)
-	virtual void setupFrameBuffer() = 0;
 	// Setup a default render pass
 
 	/** @brief (Virtual) Called after the physical device features have been read, can be used to set features to enable on the device */
@@ -309,7 +431,7 @@ public:
 	void createPipelineCache();
 
 	// Prepare commonly used Vulkan functions
-	virtual void prepare();
+	void prepare();
 
 	// Load a SPIR-V shader
 	VkPipelineShaderStageCreateInfo loadShader(std::string fileName, VkShaderStageFlagBits stage);
